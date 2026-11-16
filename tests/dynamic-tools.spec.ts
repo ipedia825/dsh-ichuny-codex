@@ -1,0 +1,1412 @@
+import {
+  LlmError,
+  LlmRuntime,
+  MessageId,
+  type GenerateOptions,
+  type Message,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { Context } from '@deepseek-ai/cordis'
+import { describe, expect, it, vi } from 'vitest'
+import { toolCallId as CallId } from '../src/dsh-compat.js'
+
+import {
+  CODEX_PROVIDER,
+  MAX_DYNAMIC_TOOL_ARGUMENT_BYTES,
+  MAX_DYNAMIC_TOOL_CATALOG_BYTES,
+  MAX_DYNAMIC_TOOL_DESCRIPTION_BYTES,
+  MAX_DYNAMIC_TOOL_NAME_BYTES,
+  MAX_DYNAMIC_TOOL_RESULT_BYTES,
+  MAX_DYNAMIC_TOOL_SCHEMA_BYTES,
+  MAX_DYNAMIC_TOOLS,
+  MAX_PENDING_DYNAMIC_TOOL_CALLS,
+  CodexAdapter,
+} from '../src/adapter.js'
+import type { AppServerClient } from '../src/app-server/client.js'
+import type {
+  AppServerNotification,
+  AppServerRequest,
+  CodexAccountStatus,
+  CodexModel,
+  CodexTurn,
+  JsonValue,
+  ServerRequestHandler,
+} from '../src/app-server/types.js'
+
+type NotificationListener = (notification: AppServerNotification) => void
+
+const TOOL = {
+  name: 'delegate_claude',
+  description: 'Delegate a coding task to Claude.',
+  parameters: {
+    type: 'object',
+    properties: { task: { type: 'string' } },
+    required: ['task'],
+    additionalProperties: false,
+  },
+}
+
+const MODEL: CodexModel = {
+  id: 'model-id',
+  model: 'gpt-test',
+  displayName: 'GPT Test',
+  description: 'Test model',
+  hidden: false,
+  isDefault: true,
+  inputModalities: ['text'],
+  reasoningEfforts: [],
+  defaultReasoningEffort: 'medium',
+}
+
+const SECOND_MODEL: CodexModel = {
+  ...MODEL,
+  id: 'model-id-2',
+  model: 'gpt-test-2',
+  displayName: 'GPT Test 2',
+  isDefault: false,
+}
+
+const MAX_DYNAMIC_TOOL_CALL_ID_BYTES = 256
+
+function createFakeClient() {
+  const listeners = new Set<NotificationListener>()
+  let handler: ServerRequestHandler | undefined
+  const client = {
+    readAccount: vi.fn(async (): Promise<CodexAccountStatus> => ({
+      authenticated: true,
+      kind: 'chatgpt',
+      requiresOpenaiAuth: true,
+    })),
+    listModels: vi.fn(async () => [MODEL, SECOND_MODEL] as readonly CodexModel[]),
+    startThread: vi.fn(async () => ({ id: 'thread-tools' })),
+    resumeThread: vi.fn(async (options: { readonly threadId: string }) => ({
+      id: options.threadId,
+    })),
+    startTurn: vi.fn(async (): Promise<CodexTurn> => ({
+      id: 'turn-tools',
+      status: 'inProgress',
+      items: [],
+      error: null,
+    })),
+    interruptTurn: vi.fn(async () => undefined),
+    onNotification: vi.fn((listener: NotificationListener) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    }),
+    registerServerRequestHandler: vi.fn((candidate: ServerRequestHandler) => {
+      if (handler !== undefined) throw new Error('handler already registered')
+      handler = candidate
+      return () => {
+        if (handler === candidate) handler = undefined
+      }
+    }),
+    close: vi.fn(async () => undefined),
+  }
+
+  return {
+    client: client as unknown as AppServerClient,
+    methods: client,
+    emit(notification: AppServerNotification): void {
+      for (const listener of listeners) listener(notification)
+    },
+    requestDynamicTool(
+      callId: string,
+      tool: string,
+      argumentsValue: JsonValue,
+      requestId: string = `rpc-${callId}`,
+      signal: AbortSignal = new AbortController().signal,
+    ): Promise<JsonValue> {
+      if (handler === undefined) {
+        return Promise.reject(new Error('dynamic-tool handler is not registered'))
+      }
+      const request: AppServerRequest = {
+        id: requestId,
+        method: 'item/tool/call',
+        params: {
+          threadId: 'thread-tools',
+          turnId: 'turn-tools',
+          callId,
+          namespace: null,
+          tool,
+          arguments: argumentsValue,
+        },
+      }
+      return handler(request, signal)
+    },
+    requestServer(
+      request: AppServerRequest,
+      signal: AbortSignal = new AbortController().signal,
+    ): Promise<JsonValue> {
+      if (handler === undefined) {
+        return Promise.reject(new Error('server-request handler is not registered'))
+      }
+      return handler(request, signal)
+    },
+  }
+}
+
+type FakeClient = ReturnType<typeof createFakeClient>
+
+function createAdapter(
+  fake: FakeClient,
+  experimentalDynamicTools: boolean,
+  attachments?: AttachmentStore,
+): CodexAdapter {
+  return new CodexAdapter({
+    client: fake.client,
+    cwd: '/workspace',
+    sandbox: 'workspace-write',
+    approvalPolicy: 'untrusted',
+    allowApiKeyAuth: false,
+    requestTimeoutMs: 100,
+    turnTimeoutMs: 1_000,
+    experimentalDynamicTools,
+    ...(attachments === undefined ? {} : { attachments: () => attachments }),
+  })
+}
+
+const IMAGE_BYTES = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10])
+const IMAGE_BASE64 = Buffer.from(IMAGE_BYTES).toString('base64')
+
+function imageStore(): {
+  readonly store: AttachmentStore
+  readonly readImageRequest: ReturnType<typeof vi.fn>
+} {
+  const readImageRequest = vi.fn(async () => ({
+    data: IMAGE_BYTES,
+    mediaType: 'image/png',
+  }))
+  return { store: { readImageRequest } as unknown as AttachmentStore, readImageRequest }
+}
+
+/** A tool result carrying a caption and a screenshot, as a browser tool returns. */
+function imageToolResultMessage(id: string, callId: string, text: string): Message {
+  return {
+    ...toolResultMessage(id, callId, text),
+    content: [{
+      type: 'tool-result',
+      toolCallId: CallId(callId),
+      content: [
+        { type: 'text', text },
+        {
+          type: 'image',
+          attachment: {
+            attachmentId: 'attachment-1',
+            mediaType: 'image/png',
+            bytes: IMAGE_BYTES.byteLength,
+            width: 2,
+            height: 2,
+          },
+        },
+      ],
+    }],
+  } as Message
+}
+
+function userMessage(id: string, text: string): Message {
+  return {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }
+}
+
+function assistantToolCallMessage(callId: string): Message {
+  return {
+    id: MessageId(`assistant-${callId}`),
+    role: 'assistant',
+    content: [{
+      type: 'tool-call',
+      id: CallId(callId),
+      name: TOOL.name,
+      arguments: '{"task":"implement"}',
+    }],
+    source: {
+      kind: 'model',
+      provider: CODEX_PROVIDER,
+      model: 'gpt-test',
+    },
+  }
+}
+
+function pluginNoticeMessage(id: string, text: string): Message {
+  // What DSH injects when a background subagent finishes: the user role, but
+  // produced by a plugin rather than typed by anyone.
+  return {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: {
+      kind: 'plugin',
+      plugin: 'tool-jobs',
+      form: 'notice',
+    },
+  } as unknown as Message
+}
+
+function toolResultMessage(
+  id: string,
+  callId: string,
+  text: string,
+  isError = false,
+): Message {
+  return {
+    id: MessageId(id),
+    role: 'user',
+    content: [{
+      type: 'tool-result',
+      toolCallId: CallId(callId),
+      content: [{ type: 'text', text }],
+      isError,
+    }],
+    source: { kind: 'tool', callId: CallId(callId) },
+  }
+}
+
+function options(
+  messages: Message[],
+  tools: NonNullable<GenerateOptions['tools']> = [TOOL],
+  overrides: Partial<GenerateOptions> = {},
+): GenerateOptions {
+  return {
+    provider: CODEX_PROVIDER,
+    model: 'gpt-test',
+    sessionId: 'session-tools' as NonNullable<GenerateOptions['sessionId']>,
+    messages,
+    tools,
+    ...overrides,
+  }
+}
+
+async function collect(iterable: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> {
+  const chunks: StreamChunk[] = []
+  for await (const chunk of iterable) chunks.push(chunk)
+  return chunks
+}
+
+function emitCompletedTurn(fake: FakeClient, text = 'done'): void {
+  fake.emit({
+    method: 'turn/completed',
+    params: {
+      threadId: 'thread-tools',
+      turn: {
+        id: 'turn-tools',
+        status: 'completed',
+        items: [{ type: 'agentMessage', text }],
+        error: null,
+      },
+    },
+  })
+}
+
+async function beginDynamicCall(
+  fake: FakeClient,
+  adapter: CodexAdapter,
+  callId = 'call-claude',
+): Promise<{
+  readonly initialUser: Message
+  readonly response: Promise<JsonValue>
+  readonly chunks: readonly StreamChunk[]
+}> {
+  const initialUser = userMessage('user-initial', 'implement the task')
+  const firstStream = collect(adapter.stream(options([initialUser])))
+  await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+  const response = fake.requestDynamicTool(
+    callId,
+    TOOL.name,
+    { task: 'implement' },
+  )
+  const chunks = await firstStream
+  return { initialUser, response, chunks }
+}
+
+describe('experimental dynamic-tool bridge', () => {
+  it('maps a call to canonical chunks and continues the same Codex turn after success', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const initialUser = userMessage('user-initial', 'implement the task')
+    const firstStream = collect(adapter.stream(options([initialUser])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+
+    const response = fake.requestDynamicTool(
+      'call-claude',
+      TOOL.name,
+      { task: 'implement' },
+    )
+    const firstChunks = await firstStream
+
+    expect(firstChunks).toEqual([
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      {
+        type: 'tool-call-delta',
+        index: 0,
+        id: CallId('call-claude'),
+        name: TOOL.name,
+        argumentsDelta: '{"task":"implement"}',
+      },
+      {
+        type: 'block-end',
+        index: 0,
+        block: {
+          type: 'tool-call',
+          id: CallId('call-claude'),
+          name: TOOL.name,
+          arguments: '{"task":"implement"}',
+        },
+      },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ])
+
+    const continuation = collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-claude'),
+      toolResultMessage('tool-result-claude', 'call-claude', 'implemented'),
+    ])))
+    await expect(response).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: 'implemented' }],
+      success: true,
+    })
+    emitCompletedTurn(fake)
+
+    await expect(continuation).resolves.toEqual([
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: 'done' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'done' } },
+      {
+        type: 'finish',
+        reason: { kind: 'stop' },
+        replayState: {
+          response: {
+            version: 1,
+            threadId: 'thread-tools',
+            turnId: 'turn-tools',
+          },
+        },
+      },
+    ])
+    expect(fake.methods.startTurn).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a lost cursor fatal inside a pending tool turn', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const initialUser = userMessage('user-initial', 'implement the task')
+    const firstStream = collect(adapter.stream(options([initialUser])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+
+    const response = fake.requestDynamicTool(
+      'call-claude',
+      TOOL.name,
+      { task: 'implement' },
+    )
+    await firstStream
+
+    // A pending tool turn is only meaningful relative to a known cursor. The
+    // session path may resume from a compacted history, but here the state
+    // cannot be reconstructed, so this stays an error rather than becoming a
+    // silent continuation with the wrong input.
+    await expect(collect(adapter.stream(options([
+      assistantToolCallMessage('call-claude'),
+      toolResultMessage('tool-result-claude', 'call-claude', 'implemented'),
+    ])))).rejects.toThrow(/cursor is missing/)
+
+    // The pending call is failed rather than left hanging, so the server side
+    // is not waiting on a turn that will never continue.
+    await expect(response).rejects.toThrow(/cursor is missing/)
+  })
+
+  it('maps an errored DSH tool result to an unsuccessful app-server response', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const initialUser = userMessage('user-initial', 'implement the task')
+    const firstStream = collect(adapter.stream(options([initialUser])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+    const response = fake.requestDynamicTool(
+      'call-claude',
+      TOOL.name,
+      { task: 'implement' },
+    )
+    await firstStream
+
+    const continuation = collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-claude'),
+      toolResultMessage('tool-result-claude', 'call-claude', 'Claude failed', true),
+    ])))
+    await expect(response).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: 'Claude failed' }],
+      success: false,
+    })
+    emitCompletedTurn(fake, 'fallback complete')
+    await expect(continuation).resolves.toContainEqual({
+      type: 'finish',
+      reason: { kind: 'stop' },
+      replayState: {
+        response: {
+          version: 1,
+          threadId: 'thread-tools',
+          turnId: 'turn-tools',
+        },
+      },
+    })
+  })
+
+  it('keeps stable mode fail closed for calls and tool-result continuations', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, false)
+
+    expect(fake.methods.registerServerRequestHandler).not.toHaveBeenCalled()
+    await expect(fake.requestDynamicTool(
+      'call-disabled',
+      TOOL.name,
+      { task: 'blocked' },
+    )).rejects.toThrow(/not registered/u)
+    await expect(collect(adapter.stream(options([
+      toolResultMessage('tool-result-disabled', 'call-disabled', 'blocked'),
+    ])))).rejects.toMatchObject({
+      failure: { code: 'UNSUPPORTED_TOOL_CONTINUATION' },
+    })
+  })
+
+  it.each([
+    [
+      'tool count',
+      () => Array.from({ length: MAX_DYNAMIC_TOOLS + 1 }, (_, index) => ({
+        ...TOOL,
+        name: `tool_${index}`,
+      })),
+      'DYNAMIC_TOOL_CATALOG_LIMIT',
+    ],
+    [
+      'empty name',
+      () => [{ ...TOOL, name: '' }],
+      'DYNAMIC_TOOL_NAME_INVALID',
+    ],
+    [
+      'invalid name characters',
+      () => [{ ...TOOL, name: 'delegate claude' }],
+      'DYNAMIC_TOOL_NAME_INVALID',
+    ],
+    [
+      'name bytes',
+      () => [{ ...TOOL, name: 'a'.repeat(MAX_DYNAMIC_TOOL_NAME_BYTES + 1) }],
+      'DYNAMIC_TOOL_NAME_TOO_LARGE',
+    ],
+    [
+      'description bytes',
+      () => [{
+        ...TOOL,
+        description: 'a'.repeat(MAX_DYNAMIC_TOOL_DESCRIPTION_BYTES + 1),
+      }],
+      'DYNAMIC_TOOL_DESCRIPTION_TOO_LARGE',
+    ],
+    [
+      'duplicate name',
+      () => [TOOL, { ...TOOL }],
+      'DYNAMIC_TOOL_DUPLICATE_NAME',
+    ],
+    [
+      'non-JSON schema',
+      () => [{
+        ...TOOL,
+        parameters: { invalid: undefined } as unknown as Record<string, unknown>,
+      }],
+      'DYNAMIC_TOOL_SCHEMA_INVALID',
+    ],
+    [
+      'schema bytes',
+      () => [{
+        ...TOOL,
+        parameters: { description: 'a'.repeat(MAX_DYNAMIC_TOOL_SCHEMA_BYTES) },
+      }],
+      'DYNAMIC_TOOL_SCHEMA_TOO_LARGE',
+    ],
+    [
+      'catalog bytes',
+      () => Array.from({
+        length: Math.ceil(MAX_DYNAMIC_TOOL_CATALOG_BYTES / 60_000),
+      }, (_, index) => ({
+        ...TOOL,
+        name: `large_${index}`,
+        parameters: { description: 'a'.repeat(60_000) },
+      })),
+      'DYNAMIC_TOOL_CATALOG_TOO_LARGE',
+    ],
+  ] as const)('rejects an invalid dynamic-tool %s', async (_label, makeTools, code) => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+
+    await expect(collect(adapter.stream(options(
+      [userMessage('user-invalid', 'test invalid catalog')],
+      makeTools(),
+    )))).rejects.toMatchObject({ failure: { code } })
+    expect(fake.methods.startThread).not.toHaveBeenCalled()
+    await adapter.close()
+  })
+
+  it('accepts the exact name, description and catalog-count boundaries', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const tools = Array.from({ length: MAX_DYNAMIC_TOOLS }, (_, index) => ({
+      ...TOOL,
+      name: index === 0
+        ? 'a'.repeat(MAX_DYNAMIC_TOOL_NAME_BYTES)
+        : `tool_${index}`,
+      description: index === 0
+        ? 'a'.repeat(MAX_DYNAMIC_TOOL_DESCRIPTION_BYTES)
+        : TOOL.description,
+    }))
+    fake.methods.startTurn.mockImplementationOnce(async () => {
+      queueMicrotask(() => emitCompletedTurn(fake))
+      return { id: 'turn-tools', status: 'inProgress', items: [], error: null }
+    })
+
+    await expect(collect(adapter.stream(options([
+      userMessage('user-boundary', 'test valid boundaries'),
+    ], tools)))).resolves.toContainEqual(expect.objectContaining({
+      type: 'finish',
+      reason: { kind: 'stop' },
+    }))
+    expect(fake.methods.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dynamicTools: expect.arrayContaining([
+          expect.objectContaining({
+            name: 'a'.repeat(MAX_DYNAMIC_TOOL_NAME_BYTES),
+            description: 'a'.repeat(MAX_DYNAMIC_TOOL_DESCRIPTION_BYTES),
+          }),
+        ]),
+      }),
+      expect.any(Object),
+    )
+    await adapter.close()
+  })
+
+  it('exposes multiple concurrent calls with stable indexes and correlates reversed results', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const initialUser = userMessage('user-multiple', 'delegate twice')
+    const firstStream = collect(adapter.stream(options([initialUser])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+    const firstResponse = fake.requestDynamicTool('call-1', TOOL.name, { task: 'one' })
+    const secondResponse = fake.requestDynamicTool('call-2', TOOL.name, { task: 'two' })
+
+    const chunks = await firstStream
+
+    expect(chunks).toEqual([
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      {
+        type: 'tool-call-delta', index: 0, id: CallId('call-1'),
+        name: TOOL.name, argumentsDelta: '{"task":"one"}',
+      },
+      {
+        type: 'block-end', index: 0,
+        block: {
+          type: 'tool-call', id: CallId('call-1'), name: TOOL.name,
+          arguments: '{"task":"one"}',
+        },
+      },
+      { type: 'block-start', index: 1, blockType: 'tool-call' },
+      {
+        type: 'tool-call-delta', index: 1, id: CallId('call-2'),
+        name: TOOL.name, argumentsDelta: '{"task":"two"}',
+      },
+      {
+        type: 'block-end', index: 1,
+        block: {
+          type: 'tool-call', id: CallId('call-2'), name: TOOL.name,
+          arguments: '{"task":"two"}',
+        },
+      },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ])
+
+    const continuation = collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-1'),
+      assistantToolCallMessage('call-2'),
+      toolResultMessage('result-2', 'call-2', 'two done'),
+      toolResultMessage('result-1', 'call-1', 'one done'),
+    ])))
+    await expect(firstResponse).resolves.toMatchObject({
+      contentItems: [{ type: 'inputText', text: 'one done' }],
+      success: true,
+    })
+    await expect(secondResponse).resolves.toMatchObject({
+      contentItems: [{ type: 'inputText', text: 'two done' }],
+      success: true,
+    })
+    emitCompletedTurn(fake)
+    await expect(continuation).resolves.toContainEqual(expect.objectContaining({
+      type: 'finish', reason: { kind: 'stop' },
+    }))
+    expect(fake.methods.startTurn).toHaveBeenCalledOnce()
+    await adapter.close()
+  })
+
+  it.each([
+    ['missing', [], 'DYNAMIC_TOOL_RESULT_MISSING'],
+    [
+      'unknown',
+      [toolResultMessage('result-unknown', 'call-unknown', 'unknown')],
+      'DYNAMIC_TOOL_RESULT_UNKNOWN',
+    ],
+  ] as const)('rejects a %s tool result correlation', async (_label, results, code) => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const { initialUser, response } = await beginDynamicCall(fake, adapter)
+    const responseFailure = response.catch((error: unknown) => error)
+
+    await expect(collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-claude'),
+      ...results,
+    ])))).rejects.toMatchObject({ failure: { code } })
+    await adapter.close()
+    await expect(responseFailure).resolves.toBeInstanceOf(Error)
+  })
+
+  it('rejects duplicate tool results before resolving either call twice', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const initialUser = userMessage('user-duplicates', 'delegate twice')
+    const firstStream = collect(adapter.stream(options([initialUser])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+    const firstResponse = fake.requestDynamicTool('call-1', TOOL.name, { task: 'one' })
+    const secondResponse = fake.requestDynamicTool('call-2', TOOL.name, { task: 'two' })
+    const responseFailures = [firstResponse, secondResponse].map(async (response) => (
+      await response.catch((error: unknown) => error)
+    ))
+    await firstStream
+
+    await expect(collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-1'),
+      assistantToolCallMessage('call-2'),
+      toolResultMessage('result-1a', 'call-1', 'first'),
+      toolResultMessage('result-1b', 'call-1', 'duplicate'),
+    ])))).rejects.toMatchObject({
+      failure: { code: 'DYNAMIC_TOOL_RESULT_DUPLICATE' },
+    })
+    await adapter.close()
+    await Promise.all(responseFailures)
+  })
+
+  it.each([
+    [
+      'oversized text',
+      toolResultMessage(
+        'result-large',
+        'call-claude',
+        'a'.repeat(MAX_DYNAMIC_TOOL_RESULT_BYTES + 1),
+      ),
+      'DYNAMIC_TOOL_RESULT_TOO_LARGE',
+    ],
+  ] as const)('fails closed for %s tool results', async (_label, result, code) => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const { initialUser, response } = await beginDynamicCall(fake, adapter)
+    const responseFailure = response.catch((error: unknown) => error)
+
+    await expect(collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-claude'),
+      result,
+    ])))).rejects.toMatchObject({ failure: { code } })
+    await adapter.close()
+    await responseFailure
+  })
+
+  // A screenshot must not be able to end a session. The result is already in
+  // the transcript, so throwing here fails every later turn on the same message
+  // and the replay path refuses the thread outright.
+  it('forwards an image tool result as an image, alongside its text', async () => {
+    const fake = createFakeClient()
+    const { store, readImageRequest } = imageStore()
+    const adapter = createAdapter(fake, true, store)
+    const { initialUser, response } = await beginDynamicCall(fake, adapter)
+
+    const stream = collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-claude'),
+      imageToolResultMessage('result-image', 'call-claude', 'the page renders'),
+    ])))
+
+    await expect(response).resolves.toMatchObject({
+      contentItems: [
+        { type: 'inputText', text: 'the page renders' },
+        { type: 'inputImage', imageUrl: `data:image/png;base64,${IMAGE_BASE64}` },
+      ],
+      success: true,
+    })
+    expect(readImageRequest).toHaveBeenCalled()
+    await adapter.close()
+    await stream.catch(() => undefined)
+  })
+
+  it('describes a block it cannot carry instead of failing the turn', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const { initialUser, response } = await beginDynamicCall(fake, adapter)
+
+    const stream = collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-claude'),
+      {
+        ...toolResultMessage('result-unsupported', 'call-claude', ''),
+        content: [{
+          type: 'tool-result',
+          toolCallId: CallId('call-claude'),
+          content: [{ type: 'reasoning', text: 'not a result' }],
+        }],
+      } as Message,
+    ])))
+
+    await expect(response).resolves.toMatchObject({
+      contentItems: [{
+        type: 'inputText',
+        text: '[reasoning content omitted: this bridge carries text and images]',
+      }],
+      success: true,
+    })
+    await adapter.close()
+    await stream.catch(() => undefined)
+  })
+
+  it('reports a missing attachment store in the text rather than failing', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const { initialUser, response } = await beginDynamicCall(fake, adapter)
+
+    const stream = collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-claude'),
+      imageToolResultMessage('result-image', 'call-claude', 'the page renders'),
+    ])))
+
+    await expect(response).resolves.toMatchObject({
+      contentItems: [{
+        type: 'inputText',
+        text: 'the page renders[image omitted: no attachment store is configured]',
+      }],
+      success: true,
+    })
+    await adapter.close()
+    await stream.catch(() => undefined)
+  })
+
+  it('rejects unknown, namespaced, oversized and malformed server calls', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const controller = new AbortController()
+    const stream = collect(adapter.stream(options(
+      [userMessage('user-calls', 'validate calls')],
+      [TOOL],
+      { signal: controller.signal },
+    )))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+
+    await expect(fake.requestDynamicTool(
+      'call-unknown-tool', 'missing_tool', {},
+    )).rejects.toMatchObject({ failure: { code: 'DYNAMIC_TOOL_UNKNOWN' } })
+    await expect(fake.requestServer({
+      id: 'rpc-namespace',
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thread-tools', turnId: 'turn-tools', callId: 'call-namespace',
+        namespace: 'agents', tool: TOOL.name, arguments: {},
+      },
+    })).rejects.toMatchObject({
+      failure: { code: 'DYNAMIC_TOOL_NAMESPACE_UNSUPPORTED' },
+    })
+    await expect(fake.requestDynamicTool(
+      'call-large',
+      TOOL.name,
+      { payload: 'a'.repeat(MAX_DYNAMIC_TOOL_ARGUMENT_BYTES) },
+    )).rejects.toMatchObject({
+      failure: { code: 'DYNAMIC_TOOL_ARGUMENTS_TOO_LARGE' },
+    })
+    expect(() => fake.requestServer({
+      id: 'rpc-malformed',
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thread-tools', turnId: 'turn-tools',
+        namespace: null, tool: TOOL.name, arguments: {},
+      },
+    })).toThrow(/callId/u)
+
+    controller.abort(new LlmError('cancelled', 'ABORTED'))
+    await expect(stream).resolves.toContainEqual(expect.objectContaining({
+      type: 'finish', reason: expect.objectContaining({ kind: 'aborted' }),
+    }))
+    await adapter.close()
+  })
+
+  it('enforces the pending-call bound and rejects duplicate call ids', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const stream = collect(adapter.stream(options([
+      userMessage('user-pending-limit', 'delegate many'),
+    ])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+    const responses = Array.from({ length: MAX_PENDING_DYNAMIC_TOOL_CALLS }, (_, index) => (
+      fake.requestDynamicTool(`call-${index}`, TOOL.name, { index })
+    ))
+    const responseFailures = responses.map(async (response) => (
+      await response.catch((error: unknown) => error)
+    ))
+
+    await expect(fake.requestDynamicTool(
+      'call-over-limit', TOOL.name, {},
+    )).rejects.toMatchObject({
+      failure: { code: 'DYNAMIC_TOOL_PENDING_LIMIT' },
+    })
+    await expect(fake.requestDynamicTool(
+      'call-0', TOOL.name, {}, 'rpc-duplicate',
+    )).rejects.toMatchObject({
+      failure: { code: 'DYNAMIC_TOOL_DUPLICATE' },
+    })
+    const chunks = await stream
+    expect(chunks.filter((chunk) => chunk.type === 'block-end')).toHaveLength(
+      MAX_PENDING_DYNAMIC_TOOL_CALLS,
+    )
+    await adapter.close()
+    await Promise.all(responseFailures)
+  })
+
+  it('aborts and closes deferred calls without starting another Codex turn', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const controller = new AbortController()
+    const initialUser = userMessage('user-abort', 'delegate then abort')
+    const firstStream = collect(adapter.stream(options(
+      [initialUser],
+      [TOOL],
+      { signal: controller.signal },
+    )))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+    const response = fake.requestDynamicTool('call-abort', TOOL.name, {})
+    await firstStream
+
+    controller.abort(new LlmError('cancelled by user', 'ABORTED'))
+
+    await expect(response).rejects.toMatchObject({ failure: { code: 'ABORTED' } })
+    await vi.waitFor(() => expect(fake.methods.interruptTurn).toHaveBeenCalledOnce())
+    await adapter.close()
+    expect(fake.methods.close).toHaveBeenCalledOnce()
+    expect(fake.methods.startTurn).toHaveBeenCalledOnce()
+  })
+
+  it('fails pending calls with ADAPTER_CLOSED and unregisters the handler', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const { response } = await beginDynamicCall(fake, adapter)
+
+    const closed = adapter.close()
+
+    await expect(response).rejects.toMatchObject({
+      failure: { code: 'ADAPTER_CLOSED' },
+    })
+    await closed
+    expect(fake.methods.close).toHaveBeenCalledOnce()
+    await expect(fake.requestDynamicTool(
+      'call-after-close', TOOL.name, {},
+    )).rejects.toThrow(/not registered/u)
+  })
+
+  it('continues a prepared LlmRuntime call without repeating account or model RPCs', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const ctx = new Context()
+    const llmFiber = await ctx.plugin(LlmRuntime)
+    const unregister = ctx.llm.registerAdapter([CODEX_PROVIDER], adapter)
+    const initialUser = userMessage('runtime-user', 'delegate through runtime')
+    const firstPrepared = await ctx.llm.prepareCall({
+      provider: CODEX_PROVIDER,
+      model: MODEL.model,
+    })
+    const firstStream = collect(firstPrepared.stream(options([initialUser])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+    const response = fake.requestDynamicTool(
+      'runtime-call',
+      TOOL.name,
+      { task: 'runtime' },
+    )
+    await firstStream
+    const accountReadsWhileWaiting = fake.methods.readAccount.mock.calls.length
+    const modelListsWhileWaiting = fake.methods.listModels.mock.calls.length
+
+    const secondPrepared = await ctx.llm.prepareCall({
+      provider: CODEX_PROVIDER,
+      model: MODEL.model,
+    })
+    const continuation = collect(secondPrepared.stream(options([
+      initialUser,
+      assistantToolCallMessage('runtime-call'),
+      toolResultMessage('runtime-result', 'runtime-call', 'runtime done'),
+    ])))
+    await expect(response).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: 'runtime done' }],
+      success: true,
+    })
+    emitCompletedTurn(fake, 'runtime complete')
+    await expect(continuation).resolves.toContainEqual(expect.objectContaining({
+      type: 'finish',
+      reason: { kind: 'stop' },
+    }))
+
+    expect(fake.methods.readAccount).toHaveBeenCalledTimes(accountReadsWhileWaiting)
+    expect(fake.methods.listModels).toHaveBeenCalledTimes(modelListsWhileWaiting)
+    expect(fake.methods.startTurn).toHaveBeenCalledOnce()
+    unregister()
+    await adapter.close()
+    await llmFiber.dispose()
+  })
+
+  it('resolves another session model from the complete cache while a tool call is pending', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const ctx = new Context()
+    const llmFiber = await ctx.plugin(LlmRuntime)
+    const unregister = ctx.llm.registerAdapter([CODEX_PROVIDER], adapter)
+    const firstPrepared = await ctx.llm.prepareCall({
+      provider: CODEX_PROVIDER,
+      model: MODEL.model,
+    })
+    const firstStream = collect(firstPrepared.stream(options([
+      userMessage('cache-user-a', 'start a delegated task'),
+    ])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+    const pendingResponse = fake.requestDynamicTool(
+      'cache-call-a',
+      TOOL.name,
+      { task: 'hold session A' },
+    )
+    const pendingFailure = pendingResponse.catch((error: unknown) => error)
+    await firstStream
+    const accountReads = fake.methods.readAccount.mock.calls.length
+    const modelLists = fake.methods.listModels.mock.calls.length
+
+    await expect(ctx.llm.prepareCall({
+      provider: CODEX_PROVIDER,
+      model: SECOND_MODEL.model,
+    })).resolves.toBeDefined()
+    await expect(ctx.llm.prepareCall({
+      provider: CODEX_PROVIDER,
+      model: 'missing-model',
+    })).rejects.toMatchObject({ failure: { code: 'UNKNOWN_MODEL' } })
+    expect(fake.methods.readAccount).toHaveBeenCalledTimes(accountReads)
+    expect(fake.methods.listModels).toHaveBeenCalledTimes(modelLists)
+
+    unregister()
+    await adapter.close()
+    await pendingFailure
+    await llmFiber.dispose()
+  })
+
+  it('replaces stale model metadata with each complete catalog snapshot', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    await adapter.resolveModel(CODEX_PROVIDER, SECOND_MODEL.model)
+    fake.methods.listModels.mockResolvedValue([MODEL])
+    await adapter.resolveModel(CODEX_PROVIDER, MODEL.model)
+    const { response } = await beginDynamicCall(fake, adapter, 'snapshot-call')
+    const responseFailure = response.catch((error: unknown) => error)
+    const modelLists = fake.methods.listModels.mock.calls.length
+
+    await expect(adapter.resolveModel(
+      CODEX_PROVIDER,
+      SECOND_MODEL.model,
+    )).rejects.toMatchObject({ failure: { code: 'UNKNOWN_MODEL' } })
+    expect(fake.methods.listModels).toHaveBeenCalledTimes(modelLists)
+
+    await adapter.close()
+    await responseFailure
+  })
+
+  it('does not claim catalog completeness when unique model aliases exceed the cache bound', async () => {
+    const fake = createFakeClient()
+    const largeCatalog = Array.from({ length: 129 }, (_, index): CodexModel => ({
+      ...MODEL,
+      id: `large-id-${String(index)}`,
+      model: `large-model-${String(index)}`,
+      displayName: `Large Model ${String(index)}`,
+      isDefault: index === 0,
+    }))
+    fake.methods.listModels.mockResolvedValue(largeCatalog)
+    const adapter = createAdapter(fake, true)
+    await adapter.resolveModel(CODEX_PROVIDER, largeCatalog[0]?.model ?? '')
+    const { response } = await beginDynamicCall(fake, adapter, 'large-cache-call')
+    const responseFailure = response.catch((error: unknown) => error)
+    const modelLists = fake.methods.listModels.mock.calls.length
+
+    await expect(adapter.resolveModel(
+      CODEX_PROVIDER,
+      largeCatalog[1]?.model ?? '',
+    )).rejects.toMatchObject({
+      failure: { code: 'DYNAMIC_TOOL_MODEL_METADATA_MISSING' },
+    })
+    expect(fake.methods.listModels).toHaveBeenCalledTimes(modelLists)
+
+    await adapter.close()
+    await responseFailure
+  })
+
+  it('fails closed when a tool-result tries to replay pending dynamic state', async () => {
+    const original = createFakeClient()
+    const originalAdapter = createAdapter(original, true)
+    const { initialUser, response } = await beginDynamicCall(original, originalAdapter)
+    const responseFailure = response.catch((error: unknown) => error)
+    await originalAdapter.close()
+    await responseFailure
+    const replayedAssistant: Message = {
+      ...assistantToolCallMessage('call-claude'),
+      source: {
+        kind: 'model',
+        provider: CODEX_PROVIDER,
+        model: MODEL.model,
+        replayState: {
+          response: {
+            version: 1,
+            threadId: 'thread-tools',
+            turnId: 'turn-tools',
+            pendingDynamicTools: true,
+          },
+        },
+      },
+    }
+    const fresh = createFakeClient()
+    const freshAdapter = createAdapter(fresh, true)
+
+    await expect(collect(freshAdapter.stream(options([
+      initialUser,
+      replayedAssistant,
+      toolResultMessage('replayed-result', 'call-claude', 'must not dispatch'),
+    ])))).rejects.toMatchObject({
+      failure: { code: 'DYNAMIC_TOOL_STATE_LOST' },
+    })
+    expect(fresh.methods.startThread).not.toHaveBeenCalled()
+    expect(fresh.methods.startTurn).not.toHaveBeenCalled()
+    await freshAdapter.close()
+  })
+
+  it('reports why a dynamic tool call was refused', async () => {
+    // Codex renders every refusal as its own `dynamic tool request failed`,
+    // with no reason attached, so a session that refused all seven of its
+    // calls was indistinguishable from one that timed out. This seam is what
+    // makes the failure class readable outside Codex's own wording.
+    const refusals: {
+      code: string
+      tool?: string
+      threadId?: string
+      message: string
+    }[] = []
+    const fake = createFakeClient()
+    const adapter = new CodexAdapter({
+      client: fake.client,
+      cwd: '/workspace',
+      sandbox: 'workspace-write',
+      approvalPolicy: 'untrusted',
+      allowApiKeyAuth: false,
+      experimentalDynamicTools: true,
+      requestTimeoutMs: 100,
+      turnTimeoutMs: 1_000,
+      onRejectedToolCall: ({ code, tool, message, threadId }) => {
+        refusals.push({
+          code,
+          ...(tool === undefined ? {} : { tool }),
+          ...(threadId === undefined ? {} : { threadId }),
+          message,
+        })
+      },
+    })
+
+    // A call arriving for a thread with no live turn: the exact shape behind
+    // seven silent failures in a real session.
+    await expect(fake.requestServer({
+      id: 'rpc-orphan',
+      method: 'item/tool/call',
+      params: {
+        threadId: 'thread-unknown',
+        turnId: 'turn-unknown',
+        callId: 'call-orphan',
+        namespace: null,
+        tool: 'skill',
+        arguments: { name: 'plugin-creator' },
+      },
+    })).rejects.toMatchObject({ code: 'DYNAMIC_TOOL_STATE_LOST' })
+
+    // The thread and the *reason* are the point. A refusal that says only
+    // "no live turn" leaves the two causes — a thread this adapter never
+    // tracked, and a turn that closed under it — reading identically, which is
+    // the question rather than the answer.
+    expect(refusals).toEqual([
+      {
+        code: 'DYNAMIC_TOOL_STATE_LOST',
+        tool: 'skill',
+        threadId: 'thread-unknown',
+        message: 'Dynamic tool call has no live Codex turn — thread is not tracked'
+          + ' by this adapter (tracking 0: none)',
+      },
+    ])
+    await adapter.close()
+  })
+
+  it('accepts a plugin context injection while dynamic tool calls are pending', async () => {
+    // A background subagent finishing mid-turn used to fail the whole turn
+    // with DYNAMIC_TOOL_UNEXPECTED_INPUT: the guard rejected on the user role,
+    // and DSH gives injected context that role too. That is the orchestrator's
+    // own workflow — start subagents, keep working, collect them as they land.
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const { initialUser, response } = await beginDynamicCall(fake, adapter)
+
+    const streamed = collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-claude'),
+      pluginNoticeMessage('jobs-notice', 'background job subagent-1 finished'),
+      toolResultMessage('result-ok', 'call-claude', 'delegated work done'),
+    ])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalled())
+    emitCompletedTurn(fake, 'continued')
+    await expect(streamed).resolves.toBeDefined()
+    await response.catch(() => undefined)
+    await adapter.close()
+  })
+
+  it('still refuses a typed question while dynamic tool calls are pending', async () => {
+    // The guard has a real job: the app-server is waiting for tool results, so
+    // there is nowhere to put a new question until they arrive.
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const { initialUser, response } = await beginDynamicCall(fake, adapter)
+    const responseFailure = response.catch((error: unknown) => error)
+
+    await expect(collect(adapter.stream(options([
+      initialUser,
+      assistantToolCallMessage('call-claude'),
+      userMessage('interrupting', 'actually, do something else'),
+      toolResultMessage('result-ok', 'call-claude', 'delegated work done'),
+    ])))).rejects.toMatchObject({
+      failure: { code: 'DYNAMIC_TOOL_UNEXPECTED_INPUT' },
+    })
+    await responseFailure
+    await adapter.close()
+  })
+
+  it('resumes the thread when new user input follows a lost dynamic turn', async () => {
+    const original = createFakeClient()
+    const originalAdapter = createAdapter(original, true)
+    const { initialUser, response } = await beginDynamicCall(original, originalAdapter)
+    const responseFailure = response.catch((error: unknown) => error)
+    await originalAdapter.close()
+    await responseFailure
+    const replayedAssistant: Message = {
+      ...assistantToolCallMessage('call-claude'),
+      source: {
+        kind: 'model',
+        provider: CODEX_PROVIDER,
+        model: MODEL.model,
+        replayState: {
+          response: {
+            version: 1,
+            threadId: 'thread-tools',
+            turnId: 'turn-tools',
+            pendingDynamicTools: true,
+          },
+        },
+      },
+    }
+    const fresh = createFakeClient()
+    const freshAdapter = createAdapter(fresh, true)
+
+    const streamed = collect(freshAdapter.stream(options([
+      initialUser,
+      replayedAssistant,
+      toolResultMessage('replayed-result', 'call-claude', 'stale, must be dropped'),
+      userMessage('user-after-loss', 'carry on without that tool call'),
+    ])))
+    await vi.waitFor(() => expect(fresh.methods.startTurn).toHaveBeenCalled())
+    emitCompletedTurn(fresh, 'continued')
+    await streamed
+
+    expect(fresh.methods.resumeThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: 'thread-tools',
+        dynamicTools: expect.any(Array),
+      }),
+      expect.anything(),
+    )
+    expect(fresh.methods.startTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: [{ type: 'text', text: 'carry on without that tool call' }],
+      }),
+      expect.anything(),
+    )
+    await freshAdapter.close()
+  })
+
+  it.each([
+    [
+      'duplicate',
+      () => [
+        toolResultMessage('atomic-valid', 'atomic-1', 'must stay buffered'),
+        toolResultMessage('atomic-duplicate', 'atomic-1', 'duplicate'),
+      ],
+      'DYNAMIC_TOOL_RESULT_DUPLICATE',
+    ],
+    [
+      'invalid source correlation',
+      () => [
+        toolResultMessage('atomic-valid', 'atomic-1', 'must stay buffered'),
+        {
+          ...toolResultMessage('atomic-invalid', 'atomic-2', 'invalid'),
+          source: { kind: 'tool' as const, callId: CallId('atomic-1') },
+        },
+      ],
+      'DYNAMIC_TOOL_RESULT_INVALID',
+    ],
+    [
+      'oversized',
+      () => [
+        toolResultMessage('atomic-valid', 'atomic-1', 'must stay buffered'),
+        toolResultMessage(
+          'atomic-large',
+          'atomic-2',
+          'a'.repeat(MAX_DYNAMIC_TOOL_RESULT_BYTES + 1),
+        ),
+      ],
+      'DYNAMIC_TOOL_RESULT_TOO_LARGE',
+    ],
+  ] as const)(
+    'rejects an entire %s result batch before sending any app-server response',
+    async (_label, makeResults, code) => {
+      const fake = createFakeClient()
+      const adapter = createAdapter(fake, true)
+      const initialUser = userMessage('atomic-user', 'delegate atomically')
+      const firstStream = collect(adapter.stream(options([initialUser])))
+      await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+      const firstResponse = fake.requestDynamicTool('atomic-1', TOOL.name, { task: 'one' })
+      const secondResponse = fake.requestDynamicTool('atomic-2', TOOL.name, { task: 'two' })
+      const firstResolved = vi.fn()
+      const secondResolved = vi.fn()
+      void firstResponse.then(firstResolved, () => {})
+      void secondResponse.then(secondResolved, () => {})
+      await firstStream
+
+      await expect(collect(adapter.stream(options([
+        initialUser,
+        assistantToolCallMessage('atomic-1'),
+        assistantToolCallMessage('atomic-2'),
+        ...makeResults(),
+      ])))).rejects.toMatchObject({ failure: { code } })
+
+      expect(firstResolved).not.toHaveBeenCalled()
+      expect(secondResolved).not.toHaveBeenCalled()
+      await expect(firstResponse).rejects.toMatchObject({ failure: { code } })
+      await expect(secondResponse).rejects.toMatchObject({ failure: { code } })
+      expect(fake.methods.interruptTurn).toHaveBeenCalledOnce()
+      expect(fake.methods.close).not.toHaveBeenCalled()
+      await adapter.close()
+    },
+  )
+
+  it('accepts a 256-byte UTF-8 call id and rejects 257 bytes before call history', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const stream = collect(adapter.stream(options([
+      userMessage('call-id-user', 'validate call ids'),
+    ])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+    const acceptedCallId = 'é'.repeat(MAX_DYNAMIC_TOOL_CALL_ID_BYTES / 2)
+    const oversizedCallId = `${acceptedCallId}a`
+
+    await expect(fake.requestDynamicTool(
+      oversizedCallId,
+      TOOL.name,
+      { task: 'reject' },
+    )).rejects.toMatchObject({
+      failure: { code: 'DYNAMIC_TOOL_CALL_ID_TOO_LARGE' },
+    })
+    await expect(fake.requestDynamicTool(
+      oversizedCallId,
+      TOOL.name,
+      { task: 'reject again' },
+      'rpc-oversized-again',
+    )).rejects.toMatchObject({
+      failure: { code: 'DYNAMIC_TOOL_CALL_ID_TOO_LARGE' },
+    })
+    const acceptedResponse = fake.requestDynamicTool(
+      acceptedCallId,
+      TOOL.name,
+      { task: 'accept' },
+    )
+    const acceptedFailure = acceptedResponse.catch((error: unknown) => error)
+
+    await expect(stream).resolves.toEqual([
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      {
+        type: 'tool-call-delta',
+        index: 0,
+        id: CallId(acceptedCallId),
+        name: TOOL.name,
+        argumentsDelta: '{"task":"accept"}',
+      },
+      {
+        type: 'block-end',
+        index: 0,
+        block: {
+          type: 'tool-call',
+          id: CallId(acceptedCallId),
+          name: TOOL.name,
+          arguments: '{"task":"accept"}',
+        },
+      },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ])
+    await adapter.close()
+    await acceptedFailure
+  })
+
+  it('interrupts a timed-out server request once and safely starts the next turn', async () => {
+    const fake = createFakeClient()
+    const adapter = createAdapter(fake, true)
+    const initialUser = userMessage('timeout-user', 'delegate then time out')
+    const firstStream = collect(adapter.stream(options([initialUser])))
+    await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+    const requestController = new AbortController()
+    const response = fake.requestDynamicTool(
+      'timeout-call',
+      TOOL.name,
+      { task: 'wait' },
+      'rpc-timeout',
+      requestController.signal,
+    )
+    await firstStream
+    const timeout = new Error('Codex app-server server request timed out')
+    timeout.name = 'AppServerTimeoutError'
+
+    requestController.abort(timeout)
+
+    await expect(response).rejects.toBe(timeout)
+    await vi.waitFor(() => expect(fake.methods.interruptTurn).toHaveBeenCalledOnce())
+    expect(fake.methods.close).not.toHaveBeenCalled()
+
+    fake.methods.startTurn.mockImplementationOnce(async () => {
+      queueMicrotask(() => emitCompletedTurn(fake, 'next turn safe'))
+      return { id: 'turn-tools', status: 'inProgress', items: [], error: null }
+    })
+    await expect(collect(adapter.stream(options([
+      initialUser,
+      userMessage('after-timeout', 'continue safely'),
+    ])))).resolves.toContainEqual(expect.objectContaining({
+      type: 'finish',
+      reason: { kind: 'stop' },
+    }))
+    expect(fake.methods.startTurn).toHaveBeenCalledTimes(2)
+    expect(fake.methods.interruptTurn).toHaveBeenCalledOnce()
+    expect(fake.methods.close).not.toHaveBeenCalled()
+    await adapter.close()
+  })
+})
