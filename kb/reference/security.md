@@ -23,16 +23,16 @@ Untrusted app-server JSONL is framed and runtime-validated before use. The trans
 
 ## DSH tools and approvals
 
-The app-server connection enables its experimental API. Tools are offered when DSH supplies them on a request with `sessionId`; there is no plugin-level opt-in switch. The adapter does not run DSH tools itself: it emits tool-call stream blocks and returns correlated text results after DSH executes them. Current limits cover 128 tool definitions, 16 pending calls and 256 KiB serialized arguments; they do not establish a full schema fingerprint or an aggregate result-size cap. Configure Codex sandbox and approval policy explicitly for the intended host; the separate `resolveSessionPermissions` helper is not applied by the current plugin entry. [PATH: src/index.ts] [PATH: src/adapter.ts] [PATH: src/session-permissions.ts]
+The app-server connection enables its experimental API. Tools are offered when DSH supplies them on a request with `sessionId`; there is no plugin-level opt-in switch. The adapter does not run DSH tools itself: it emits tool-call stream blocks and returns correlated text results after DSH executes them. Current limits cover 128 tool definitions, 16 pending calls, 256 KiB serialized arguments, 256-byte UTF-8 call IDs and 4 MiB aggregate UTF-8 text results. Duplicate or pre-aborted incoming calls are rejected before registration. Duplicate, missing, oversized and non-text results fail the batch before any pending call is answered; failures reject pending requests and interrupt the turn. The catalog check still does not establish a full schema fingerprint. Configure Codex sandbox and approval policy explicitly for the intended host; the separate `resolveSessionPermissions` helper is not applied by the current plugin entry. [PATH: src/index.ts] [PATH: src/adapter.ts] [PATH: src/session-permissions.ts]
 
 Threads live only in an in-process map. A restart loses their state; no replay-state parser or automatic `thread/resume` path runs in the adapter. [PATH: src/adapter.ts]
 
 ## Web quota route
 
-The optional Web route exposes only selected quota fields on successful requests and does not include account IDs in that success response. The current error path sends `error.message` to the browser without passing it through `safeErrorMessage`; do not assume all HTTP errors are redacted. Review this boundary before exposing the route to untrusted clients. [PATH: src/index.ts] [PATH: client.js]
+The optional Web route exposes only selected quota fields on successful requests and does not include account IDs in that success response. Error responses pass through `safeErrorMessage` to remove credential-like values; this is not an authorization boundary. Review host access control before exposing the route to untrusted clients. [PATH: src/index.ts] [PATH: client.js]
 
 ## Verification limits
 
-The default Vitest configuration selects three test files, not every test in `tests/`. Build and package checks do not prove live DSH composition, approval behavior or authenticated Codex turns. Run a real-client smoke test before making an end-to-end release claim. [PATH: vitest.config.ts] [PATH: package.json]
+The default Vitest configuration selects every remaining spec file in `tests/`, including adapter, dynamic-tool, Cordis composition and app-server protocol coverage. Build and package checks do not prove live DSH composition, approval behavior or authenticated Codex turns. Run a real-client smoke test before making an end-to-end release claim. [PATH: vitest.config.ts] [PATH: package.json]
 
 See [architecture](architecture.md), [protocol](app-server-protocol.md) and [configuration](configuration.md).

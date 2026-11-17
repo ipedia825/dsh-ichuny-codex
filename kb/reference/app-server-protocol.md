@@ -28,9 +28,7 @@ The plugin starts the pinned native Codex executable directly with `app-server -
 
 ## Stream and server requests
 
-The adapter handles `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `thread/tokenUsage/updated`, and `turn/completed`. With DSH tools present, `item/tool/call` becomes a DSH tool call. DSH runs the tool; the adapter correlates the following tool messages and responds with text content. Non-text tool-result blocks are not forwarded by the current result parser. [PATH: src/adapter.ts]
-
-The current adapter limits tool catalogs to 128 entries, concurrent pending calls to 16 and serialized arguments to 256 KiB. It rejects changed sets of tool names after starting a thread, but does not compare full schemas on subsequent requests. The server-request timeout defaults to `requestTimeoutMs` and is cancellable; there is no independent plugin-facing tool timeout. [PATH: src/adapter.ts] [PATH: src/app-server/client.ts]
+The adapter handles `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `thread/tokenUsage/updated`, and `turn/completed`. With DSH tools present, `item/tool/call` becomes a DSH tool call. DSH runs the tool; the adapter correlates the following tool messages and responds with text content. Non-text tool-result blocks are rejected rather than silently dropped. The current adapter limits tool catalogs to 128 entries, concurrent pending calls to 16, serialized arguments to 256 KiB, UTF-8 call IDs to 256 bytes and aggregate UTF-8 text results to 4 MiB. Duplicate and already-aborted incoming tool requests are rejected before registration. It rejects duplicate and missing pending results before answering any call, and interrupts the turn on an invalid batch. It rejects changed sets of tool names after starting a thread but does not compare full schemas on subsequent requests. The server-request timeout defaults to `requestTimeoutMs` and is cancellable; there is no independent plugin-facing tool timeout. [PATH: src/adapter.ts] [PATH: src/app-server/client.ts]
 
 ## Validation and failure
 

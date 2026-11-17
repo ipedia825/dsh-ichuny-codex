@@ -20,9 +20,8 @@
   "bugs": {
     "url": "https://github.com/ipedia825/dsh-ichuny-codex/issues"
   },
-  "funding": "https://softspark.eu",
   "license": "Apache-2.0",
-  "author": "SoftSpark <biuro@softspark.eu>",
+  "author": "ipedia",
   "type": "module",
   "sideEffects": false,
   "main": "lib/index.js",
@@ -100,19 +99,21 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
-    "@deepseek-ai/dsh-attachment": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-session": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.1"
+    "@deepseek-ai/dsh-attachment": "0.2.2-rc.1 || 0.2.2-rc.3",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1 || 0.2.2-rc.3",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.1 || 0.2.2-rc.3",
+    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.1 || 0.2.2-rc.3"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
     "@deepseek-ai/cordis-plugin-include": "1.1.0",
     "@deepseek-ai/cordis-plugin-loader": "1.1.0",
-    "@deepseek-ai/dsh-attachment": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-session": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-attachment": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-error": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-scope": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.3",
     "@eslint/js": "10.0.1",
     "@types/node": "26.4.0",
     "@vitest/coverage-v8": "4.1.11",

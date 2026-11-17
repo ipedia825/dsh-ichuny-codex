@@ -31,7 +31,7 @@ dsh plugin --profile web add "file:$((Get-Location).Path)\$plugin" --save-exact 
 
 ### 运行条件
 
-- Node.js 22.19 或更高版本；当前依赖以 DSH `0.2.2-rc.1` 为目标。其他 DSH 版本需要单独验证。
+- Node.js 22.19 或更高版本；peer 声明支持 DSH `0.2.2-rc.1` 和 `0.2.2-rc.3`。两套依赖已分别通过类型检查、当前测试和构建；已完成的真实对话仅来自 rc.1 宿主的用户报告，rc.3 仍需真实客户端验证。rc.1 宿主固定的旧 Zod 版本仍有高危安全公告，建议尽可能升级至 rc.3。
 - 安装依赖时保持 optional dependencies 启用，以便安装 `@openai/codex@0.169.0` 对应平台的原生程序。
 - 运行 DSH 的同一系统用户已通过 Codex CLI 完成 ChatGPT 登录。可运行 `codex login status` 检查；全局 CLI 仅用于检查登录，不决定插件内置程序的版本。
 
@@ -49,9 +49,9 @@ dsh plugin --profile web add "file:$((Get-Location).Path)\$plugin" --save-exact 
 | `approvalPolicy` | `untrusted` | Codex 审批策略：`never`、`on-request`、`untrusted` |
 | `requestTimeoutMs` | `30000` | 单个 app-server 请求超时，范围 1000–300000 毫秒 |
 
-文本对话无需附件服务。图片由 DSH 附件存储读取并转成 data URL；文件以只读路径描述交给 Codex，而不是由插件直接读取任意文件。动态工具由 DSH 执行，当前只向 Codex 转发文本工具结果。Codex 线程仅保存在插件进程内，重启后不会自动恢复原有线程。
+文本对话无需附件服务。图片由 DSH 附件存储读取并转成 data URL；文件以只读路径描述交给 Codex，而不是由插件直接读取任意文件。动态工具由 DSH 执行，当前只接受文本工具结果，整批结果以 UTF-8 计不超过 4 MiB；重复、缺失、超限或非文本结果会拒绝整个待答批次。Codex 线程仅保存在插件进程内，重启后不会自动恢复原有线程。
 
-Web 额度控件仅在选择 `my-codex` 时出现。插件通过 `/api/dsh-ichuny-codex/rate-limits` 返回选定的额度字段，成功响应不包含账户 ID；该路由的错误响应仍可能包含原始错误消息，部署到非受信任环境前应审查这一边界。额度详情由 Codex 返回的数据决定，无法获取时控件会隐藏。
+Web 额度控件仅在选择 `my-codex` 时出现。插件通过 `/api/dsh-ichuny-codex/rate-limits` 返回选定的额度字段，成功响应不包含账户 ID；错误消息会经过凭据样式脱敏后返回，但部署到非受信任环境前仍应审查访问控制。额度详情由 Codex 返回的数据决定，无法获取时控件会隐藏。
 
 ## 开发与验证
 
@@ -66,6 +66,6 @@ npm run audit:permissions
 npm run package:check
 ```
 
-`npm test` 目前只运行 [vitest.config.ts](vitest.config.ts) 选中的 3 个测试文件。构建、打包与这些测试通过不代表已完成真实 DSH 组合测试或 Codex 登录后的端到端烟测。实现边界与进一步的排障说明见 [架构](kb/reference/architecture.md)、[配置](kb/reference/configuration.md) 和 [常见问题](kb/troubleshooting/common-issues.md)。
+`npm test` 运行 [vitest.config.ts](vitest.config.ts) 选中的全部 12 个现存 spec 文件，包含 adapter、动态工具和 Cordis 组合测试。构建、打包及这些测试通过，仍不等于已在目标 DSH 宿主中完成 rc.3 的真实对话烟测。实现边界与进一步的排障说明见 [架构](kb/reference/architecture.md)、[配置](kb/reference/configuration.md) 和 [常见问题](kb/troubleshooting/common-issues.md)。
 
 Apache-2.0 许可及原作者归属见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。

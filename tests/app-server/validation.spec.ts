@@ -84,6 +84,29 @@ describe('app-server protocol validation', () => {
     expect(result.data[0]?.inputModalities).toEqual(['text', 'image'])
   })
 
+  it('uses empty descriptions when optional model fields are absent', () => {
+    const model = {
+      ...modelListResult.data[0],
+      description: null,
+      supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: null }],
+    }
+
+    expect(parseModelPage({ data: [model], nextCursor: null }).data[0]).toMatchObject({
+      description: '',
+      reasoningEfforts: [{ id: 'medium', description: '' }],
+    })
+  })
+
+  it.each(['apiKey', 'amazonBedrock'] as const)(
+    'recognizes %s account status without exposing account fields',
+    (type) => {
+      expect(parseAccountStatus({
+        account: { type, accessToken: 'synthetic-secret' },
+        requiresOpenaiAuth: true,
+      })).toEqual({ authenticated: true, kind: type, requiresOpenaiAuth: true })
+    },
+  )
+
   it('rejects malformed model pages', () => {
     expect(() => parseModelPage({ data: {}, nextCursor: null })).toThrow(/data/u)
     expect(() => parseModelPage({ data: [], nextCursor: 12 })).toThrow(/nextCursor/u)

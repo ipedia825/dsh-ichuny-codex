@@ -31,7 +31,7 @@ dsh plugin --profile web add "file:$((Get-Location).Path)\$plugin" --save-exact 
 
 ### Requirements
 
-- Node.js 22.19 or newer. The current dependency set targets DSH `0.2.2-rc.1`; other DSH versions need separate verification.
+- Node.js 22.19 or newer. The peer contract supports DSH `0.2.2-rc.1` and `0.2.2-rc.3`. Both dependency graphs passed typechecking, the configured tests, and build; the reported live conversation used an rc.1 host, while rc.3 still needs real-client validation. The Zod version pinned by the rc.1 host has a high-severity advisory, so upgrade to rc.3 when possible.
 - Keep optional dependencies enabled so that `@openai/codex@0.169.0` installs its native executable for your platform.
 - Sign in to Codex CLI with ChatGPT as the same OS user who runs DSH. Check with `codex login status`. A global CLI can check sign-in status, but its version does not determine the bundled executable version.
 
@@ -49,9 +49,9 @@ The plugin accepts these fields through DSH plugin configuration:
 | `approvalPolicy` | `untrusted` | Codex approval policy: `never`, `on-request`, or `untrusted` |
 | `requestTimeoutMs` | `30000` | Per-request app-server timeout, from 1,000 to 300,000 ms |
 
-Text requests do not need an attachment service. Images are read from DSH attachments and sent as data URLs. Files are passed as read-only path descriptions; the plugin does not directly open arbitrary files. DSH executes dynamic tools, and the adapter currently forwards text-only tool results to Codex. Codex threads exist only in plugin process memory and are not automatically restored after a restart.
+Text requests do not need an attachment service. Images are read from DSH attachments and sent as data URLs. Files are passed as read-only path descriptions; the plugin does not directly open arbitrary files. DSH executes dynamic tools. The adapter accepts text-only tool results, with a 4 MiB UTF-8 limit for the whole batch; duplicate, missing, oversized, or non-text results reject the pending batch. Codex threads exist only in plugin process memory and are not automatically restored after a restart.
 
-The Web quota control appears only when `my-codex` is selected. `/api/dsh-ichuny-codex/rate-limits` returns selected quota fields; successful responses omit account IDs. Error responses can still include the original error message, so review this boundary before deploying on an untrusted host. The control is hidden when quota information is unavailable.
+The Web quota control appears only when `my-codex` is selected. `/api/dsh-ichuny-codex/rate-limits` returns selected quota fields; successful responses omit account IDs. Error messages are scrubbed for credential-like values, but review access control before deploying on an untrusted host. The control is hidden when quota information is unavailable.
 
 ## Development and verification
 
@@ -66,6 +66,6 @@ npm run audit:permissions
 npm run package:check
 ```
 
-`npm test` currently runs only the three test files selected in [vitest.config.ts](vitest.config.ts). A successful build, package check, or selected test run is not a real DSH composition test or an authenticated end-to-end Codex smoke test. For implementation details and troubleshooting, see [Architecture](kb/reference/architecture.md), [Configuration](kb/reference/configuration.md), and [Common issues](kb/troubleshooting/common-issues.md).
+`npm test` runs all 12 remaining spec files selected in [vitest.config.ts](vitest.config.ts), including adapter, dynamic-tool, and Cordis composition tests. A successful build, package check, or test run still does not establish an authenticated rc.3 conversation through the target DSH host. For implementation details and troubleshooting, see [Architecture](kb/reference/architecture.md), [Configuration](kb/reference/configuration.md), and [Common issues](kb/troubleshooting/common-issues.md).
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for license terms and upstream attribution.

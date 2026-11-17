@@ -29,7 +29,7 @@ npm run audit:permissions
 npm run package:check
 ```
 
-`verify` checks required files, version sync and KB frontmatter. Its `LICENSE` checksum must continue to match the reviewed Apache-2.0 license. `npm test` runs only `core`, `attachments` and `quota-client` tests selected in `vitest.config.ts`; it does not establish coverage of the remaining test files. Run additional applicable tests and an isolated DSH composition/live-client smoke before making compatibility claims. [PATH: package.json] [PATH: scripts/verify-required-files.mjs] [PATH: vitest.config.ts] [PATH: AGENTS.md]
+`verify` checks required files, version sync and KB frontmatter. Its `LICENSE` checksum must continue to match the reviewed Apache-2.0 license. `npm test` runs all remaining spec files listed in `vitest.config.ts`, including adapter, dynamic-tool, composition, app-server protocol and session-permission tests; it does not replace an isolated DSH host and live-client smoke before compatibility claims. [PATH: package.json] [PATH: scripts/verify-required-files.mjs] [PATH: vitest.config.ts] [PATH: AGENTS.md]
 
 Review `npm pack --dry-run --ignore-scripts` for `lib/`, `client.js`, `cordis.patch.yml`, README, CHANGELOG, LICENSE and NOTICE, and ensure source, tests, KB and credentials do not ship. Audit and dependency/signature checks are separate supply-chain gates; they may require registry access. Do not commit or publish an artifact with known failing required gates. [PATH: package.json] [PATH: .npmignore]
 

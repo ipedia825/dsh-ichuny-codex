@@ -13,7 +13,7 @@ description: "Diagnoses current installation, authentication, model, attachment,
 
 ## Build or verification fails
 
-Use Node.js 22.19 or newer. Install the reviewed dependency graph with `npm ci --ignore-scripts --legacy-peer-deps`, then run `npm run verify`, `npm run typecheck`, `npm test`, `npm run build` and `npm run package:check`. If the required-file check reports a `LICENSE` checksum mismatch, review the source license before changing either the file or the pinned hash. The configured test command runs three selected files, not the entire `tests/` tree. [PATH: package.json] [PATH: vitest.config.ts] [PATH: scripts/verify-required-files.mjs]
+Use Node.js 22.19 or newer. Install the reviewed dependency graph with `npm ci --ignore-scripts --legacy-peer-deps`, then run `npm run verify`, `npm run typecheck`, `npm test`, `npm run build` and `npm run package:check`. If the required-file check reports a `LICENSE` checksum mismatch, review the source license before changing either the file or the pinned hash. The configured test command runs all remaining spec files in `tests/`, but it does not replace a live DSH host smoke test. [PATH: package.json] [PATH: vitest.config.ts] [PATH: scripts/verify-required-files.mjs]
 
 ## Bundled Codex executable is missing
 
@@ -37,6 +37,6 @@ Tools require a persistent DSH `sessionId`. A catalog above 128 entries, more th
 
 ## Quota display is absent
 
-The Web client shows the quota control only while a model from `my-codex` is selected and the optional web-server route returns an available snapshot. Check `/api/dsh-ichuny-codex/rate-limits` through the host and ensure the client plugin was loaded after restarting the DSH profile. Do not expose raw error responses beyond a trusted host without reviewing the route's `error.message` path. [PATH: client.js] [PATH: src/index.ts]
+The Web client shows the quota control only while a model from `my-codex` is selected and the optional web-server route returns an available snapshot. Check `/api/dsh-ichuny-codex/rate-limits` through the host and ensure the client plugin was loaded after restarting the DSH profile. Error messages are redacted for credential-like values but the route relies on the host for access control. [PATH: client.js] [PATH: src/index.ts]
 
 See [architecture](../reference/architecture.md), [configuration](../reference/configuration.md) and [security](../reference/security.md).

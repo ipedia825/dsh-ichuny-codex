@@ -3,7 +3,7 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['tests/core.spec.ts', 'tests/attachments.spec.ts', 'tests/quota-client.spec.ts'],
+    include: ['tests/core.spec.ts', 'tests/attachments.spec.ts', 'tests/quota-client.spec.ts', 'tests/composition.spec.ts', 'tests/adapter-current.spec.ts', 'tests/dynamic-tools-current.spec.ts', 'tests/app-server/**/*.spec.ts', 'tests/session-permissions.spec.ts', 'tests/dsh-compat.spec.ts'],
     clearMocks: true,
     restoreMocks: true,
     coverage: {

@@ -1,12 +1,13 @@
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { CodexAdapter } from '../src/adapter.js'
-import { AppServerClient } from '../src/app-server/client.js'
+import { CODEX_PROVIDER, CodexAdapter } from '../src/adapter.js'
+import { bundledCodexCommand } from '../src/codex-command.js'
 import {
   apply,
   childEnvironment,
@@ -15,203 +16,242 @@ import {
 } from '../src/index.js'
 import * as DshCodexPlugin from '../src/index.js'
 
-describe('plugin configuration', () => {
-  it('resolves stable fail-closed defaults', () => {
-    expect(resolveConfig()).toEqual({
-      provider: 'codex',
-      command: 'codex',
+interface TestContext {
+  readonly llm: { readonly registerAdapter: ReturnType<typeof vi.fn> }
+  readonly inject: ReturnType<typeof vi.fn>
+  readonly effect: ReturnType<typeof vi.fn>
+}
+
+function createContext(): TestContext {
+  return {
+    llm: { registerAdapter: vi.fn(() => vi.fn()) },
+    inject: vi.fn(),
+    effect: vi.fn((execute: () => (() => void) | (() => Promise<void>)) => {
+      execute()
+      return vi.fn()
+    }),
+  }
+}
+
+describe('current plugin configuration', () => {
+  it('resolves only the supported defaults', () => {
+    const config = resolveConfig()
+
+    expect(config).toEqual({
+      command: bundledCodexCommand(),
       cwd: process.cwd(),
       sandbox: 'workspace-write',
       approvalPolicy: 'untrusted',
-      inheritSessionPermissions: false,
-      allowApiKeyAuth: false,
-      experimentalDynamicTools: false,
       requestTimeoutMs: 30_000,
-      turnTimeoutMs: 600_000,
-      dynamicToolTimeoutMs: 600_000,
     })
+    expect(Object.keys(config)).toEqual([
+      'command',
+      'cwd',
+      'sandbox',
+      'approvalPolicy',
+      'requestTimeoutMs',
+    ])
+    expect(existsSync(config.command)).toBe(true)
   })
 
-  it('enables the experimental dynamic-tool bridge only through explicit config', () => {
+  it('accepts the supported overrides and rejects invalid values', () => {
     expect(resolveConfig({
-      cwd: '/workspace',
-      experimentalDynamicTools: true,
-      dynamicToolTimeoutMs: 90_000,
-    } as Parameters<typeof resolveConfig>[0])).toMatchObject({
-      experimentalDynamicTools: true,
-      dynamicToolTimeoutMs: 90_000,
+      command: 'C:\\codex.exe',
+      cwd: 'C:\\workspace',
+      sandbox: 'read-only',
+      approvalPolicy: 'never',
+      requestTimeoutMs: 1_000,
+    })).toEqual({
+      command: 'C:\\codex.exe',
+      cwd: 'C:\\workspace',
+      sandbox: 'read-only',
+      approvalPolicy: 'never',
+      requestTimeoutMs: 1_000,
     })
 
-    expect(resolveConfig({ cwd: '/workspace' })).toMatchObject({
+    expect(() => resolveConfig({ command: '   ' })).toThrow('command must not be empty')
+    expect(() => resolveConfig({ cwd: '   ' })).toThrow('cwd must not be empty')
+    expect(() => resolveConfig({ requestTimeoutMs: 999 })).toThrow('requestTimeoutMs')
+    expect(() => resolveConfig({ requestTimeoutMs: 300_001 })).toThrow('requestTimeoutMs')
+    expect(() => resolveConfig({ requestTimeoutMs: 1_000.5 })).toThrow('requestTimeoutMs')
+  })
+
+  it('does not expose obsolete configuration fields', () => {
+    const resolved = resolveConfig({
+      cwd: '/workspace',
+      provider: 'codex',
+      allowApiKeyAuth: true,
+      inheritSessionPermissions: true,
       experimentalDynamicTools: false,
       dynamicToolTimeoutMs: 600_000,
-    })
-  })
+      turnTimeoutMs: 600_000,
+    } as Parameters<typeof resolveConfig>[0])
 
-  it('enables session permission inheritance only through explicit config', () => {
-    expect(resolveConfig({ inheritSessionPermissions: true })).toMatchObject({
-      inheritSessionPermissions: true,
+    expect(resolved).toEqual({
+      command: bundledCodexCommand(),
+      cwd: '/workspace',
       sandbox: 'workspace-write',
       approvalPolicy: 'untrusted',
+      requestTimeoutMs: 30_000,
     })
+    expect(Object.keys(resolved)).not.toEqual(expect.arrayContaining([
+      'provider',
+      'allowApiKeyAuth',
+      'inheritSessionPermissions',
+      'experimentalDynamicTools',
+      'dynamicToolTimeoutMs',
+      'turnTimeoutMs',
+    ]))
   })
 
-  it('filters ambient API keys without mutating the source unless explicitly allowed', () => {
-    const source: NodeJS.ProcessEnv = {
+  it('filters the child environment using the current allowlist', () => {
+    const source = {
       PATH: '/opt/bin',
-      HOME: '/home/tester',
       CODEX_HOME: '/home/tester/.codex',
-      HTTPS_PROXY: 'https://proxy.example.test',
-      HTTP_PROXY: 'http://proxy.example.test',
-      NO_PROXY: '127.0.0.1,localhost',
-      NODE_EXTRA_CA_CERTS: '/etc/ssl/custom.pem',
-      SSL_CERT_FILE: '/etc/ssl/cert.pem',
-      LC_ALL: 'en_US.UTF-8',
-      LANG: 'en_US.UTF-8',
-      WSL_INTEROP: '/run/WSL/123_interop',
-      CLICOLOR: '1',
-      CLICOLOR_FORCE: '1',
-      SystemRoot: 'C:\\Windows',
-      ComSpec: 'C:\\Windows\\System32\\cmd.exe',
-      PATHEXT: '.COM;.EXE;.BAT',
-      GITHUB_TOKEN: 'github-token',
-      AWS_SECRET_ACCESS_KEY: 'aws-secret',
-      ARBITRARY_SECRET: 'arbitrary-secret',
-      OPENAI_API_KEY: 'openai-key',
-      AZURE_OPENAI_API_KEY: 'azure-key',
-      CODEX_API_KEY: 'codex-key',
-    }
-    const snapshot = { ...source }
-    const requiredEnvironment = {
-      PATH: '/opt/bin',
       HOME: '/home/tester',
-      CODEX_HOME: '/home/tester/.codex',
-      HTTPS_PROXY: 'https://proxy.example.test',
-      HTTP_PROXY: 'http://proxy.example.test',
-      NO_PROXY: '127.0.0.1,localhost',
-      NODE_EXTRA_CA_CERTS: '/etc/ssl/custom.pem',
-      SSL_CERT_FILE: '/etc/ssl/cert.pem',
       LC_ALL: 'en_US.UTF-8',
-      LANG: 'en_US.UTF-8',
-      WSL_INTEROP: '/run/WSL/123_interop',
-      CLICOLOR: '1',
-      CLICOLOR_FORCE: '1',
-      SystemRoot: 'C:\\Windows',
-      ComSpec: 'C:\\Windows\\System32\\cmd.exe',
-      PATHEXT: '.COM;.EXE;.BAT',
+      HTTP_PROXY: 'http://proxy.example.test',
+      SECRET_TOKEN: 'synthetic-token',
+      OPENAI_API_KEY: 'synthetic-key',
     }
 
-    expect(childEnvironment(false, source)).toEqual(requiredEnvironment)
-    expect(source).toEqual(snapshot)
-    expect(childEnvironment(true, source)).toEqual(requiredEnvironment)
-    expect(source).toEqual(snapshot)
-  })
-
-  it.each([
-    [{ command: '   ' }, /command must not be empty/u],
-    [{ cwd: '   ' }, /cwd must not be empty/u],
-    [{ requestTimeoutMs: 999 }, /requestTimeoutMs/u],
-    [{ requestTimeoutMs: 300_001 }, /requestTimeoutMs/u],
-    [{ requestTimeoutMs: 1_000.5 }, /requestTimeoutMs/u],
-    [{ turnTimeoutMs: 999 }, /turnTimeoutMs/u],
-    [{ turnTimeoutMs: 3_600_001 }, /turnTimeoutMs/u],
-    [{ dynamicToolTimeoutMs: 999 }, /dynamicToolTimeoutMs/u],
-    [{ dynamicToolTimeoutMs: 3_600_001 }, /dynamicToolTimeoutMs/u],
-    [{ dynamicToolTimeoutMs: 1_000.5 }, /dynamicToolTimeoutMs/u],
-  ] as const)('rejects invalid config %j', (config, expected) => {
-    expect(() => resolveConfig(
-      config as Parameters<typeof resolveConfig>[0],
-    )).toThrow(expected)
-  })
-
-  it('owns adapter registration disposal and client close in one effect', async () => {
-    const unregister = vi.fn()
-    let cleanup: (() => Promise<void>) | undefined
-    const registerAdapter = vi.fn(() => unregister)
-    const close = vi.spyOn(AppServerClient.prototype, 'close').mockResolvedValue()
-    const ctx = {
-      llm: { registerAdapter },
-      // The attachment store is requested through ctx.inject, not read off ctx
-      // directly: cordis refuses an undeclared property with `cannot get
-      // property "attachments" without inject`, which failed the turn as soon
-      // as a message carried an image.
-      inject: vi.fn(),
-      logger: vi.fn(() => ({ warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() })),
-      effect: vi.fn((execute: () => () => Promise<void>) => {
-        cleanup = execute()
-        return vi.fn()
-      }),
-    } as unknown as Context
-
-    apply(ctx, { cwd: '/workspace' })
-
-    expect(registerAdapter).toHaveBeenCalledWith(
-      ['codex'],
-      expect.any(CodexAdapter),
-    )
-    expect(ctx.inject).toHaveBeenCalledWith(
-      ['attachments'],
-      expect.any(Function),
-    )
-    expect(cleanup).toBeDefined()
-    await cleanup?.()
-    expect(unregister).toHaveBeenCalledOnce()
-    expect(close).toHaveBeenCalledOnce()
-  })
-
-  it('composes the opt-in bridge without changing provider ownership', async () => {
-    const unregister = vi.fn()
-    let cleanup: (() => Promise<void>) | undefined
-    const ctx = {
-      llm: { registerAdapter: vi.fn(() => unregister) },
-      inject: vi.fn(),
-      logger: vi.fn(() => ({ warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() })),
-      effect: vi.fn((execute: () => () => Promise<void>) => {
-        cleanup = execute()
-        return vi.fn()
-      }),
-    } as unknown as Context
-
-    apply(ctx, {
-      cwd: '/workspace',
-      experimentalDynamicTools: true,
+    expect(childEnvironment(source)).toEqual({
+      PATH: '/opt/bin',
+      CODEX_HOME: '/home/tester/.codex',
+      HOME: '/home/tester',
+      LC_ALL: 'en_US.UTF-8',
+      HTTP_PROXY: 'http://proxy.example.test',
     })
-
-    expect(ctx.llm.registerAdapter).toHaveBeenCalledWith(
-      ['codex'],
-      expect.any(CodexAdapter),
-    )
-    await cleanup?.()
-    expect(unregister).toHaveBeenCalledOnce()
+    expect(source).toEqual({
+      PATH: '/opt/bin',
+      CODEX_HOME: '/home/tester/.codex',
+      HOME: '/home/tester',
+      LC_ALL: 'en_US.UTF-8',
+      HTTP_PROXY: 'http://proxy.example.test',
+      SECRET_TOKEN: 'synthetic-token',
+      OPENAI_API_KEY: 'synthetic-key',
+    })
   })
 })
 
-describe('Cordis composition', () => {
-  afterEach(() => {
-    vi.restoreAllMocks()
+describe('plugin composition', () => {
+  it('registers the my-codex provider and owns adapter cleanup', async () => {
+    const ctx = createContext()
+    let cleanup: (() => void) | (() => Promise<void>) | undefined
+    ctx.effect.mockImplementationOnce((execute: () => (() => void) | (() => Promise<void>)) => {
+      cleanup = execute()
+      return vi.fn()
+    })
+
+    apply(ctx as never, { command: 'codex', cwd: '/workspace' })
+
+    expect(ctx.llm.registerAdapter).toHaveBeenCalledWith(
+      [CODEX_PROVIDER],
+      expect.any(CodexAdapter),
+    )
+    expect(CODEX_PROVIDER).toBe('my-codex')
+    expect(cleanup).toBeDefined()
+    await cleanup?.()
   })
 
-  it('registers and tears down the codex route with the real llm service', async () => {
+  it('requests attachments and webServer through optional injection', () => {
+    const ctx = createContext()
+    const webServer = { register: vi.fn() }
+    const attachmentContext = { attachments: { readImageRequest: vi.fn() }, effect: vi.fn() }
+    const webContext = { webServer, effect: vi.fn((execute: () => unknown) => execute()) }
+    ctx.inject.mockImplementation((services: readonly string[], callback: (value: unknown) => void) => {
+      if (services[0] === 'attachments') callback(attachmentContext)
+      if (services[0] === 'webServer') callback(webContext)
+    })
+
+    apply(ctx as never, { command: 'codex', cwd: '/workspace' })
+
+    expect(ctx.inject).toHaveBeenCalledWith(['attachments'], expect.any(Function))
+    expect(ctx.inject).toHaveBeenCalledWith(['webServer'], expect.any(Function))
+    expect(webServer.register).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'exact',
+      path: '/api/dsh-ichuny-codex/rate-limits',
+      resource: expect.any(Function),
+    }))
+    expect(attachmentContext.effect).toHaveBeenCalledWith(expect.any(Function), expect.stringContaining('detach attachments'))
+  })
+
+  it('returns only selected quota fields from the optional web route', async () => {
+    const readRateLimits = vi.spyOn(CodexAdapter.prototype, 'readRateLimits').mockResolvedValueOnce({
+      accountId: 'private-account',
+      rateLimits: {
+        planType: 'plus',
+        accountId: 'private-account',
+        primary: { usedPercent: 25, resetsAt: 100, windowDurationMins: 300, token: 'private' },
+        secondary: null,
+        credits: { hasCredits: true, unlimited: false, balance: '10', token: 'private' },
+      },
+    })
+    try {
+      const ctx = createContext()
+      const webServer = { register: vi.fn() }
+      ctx.inject.mockImplementation((services: readonly string[], callback: (value: unknown) => void) => {
+        if (services[0] === 'webServer') callback({ webServer, effect: (execute: () => unknown) => execute() })
+      })
+      apply(ctx as never, { command: 'codex', cwd: '/workspace' })
+      const route = webServer.register.mock.calls[0]?.[0] as { readonly resource: () => Promise<Response> }
+
+      const response = await route.resource()
+
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({
+        available: true,
+        planType: 'plus',
+        primary: { usedPercent: 25, resetsAt: 100, windowDurationMins: 300 },
+        secondary: null,
+        credits: { hasCredits: true, unlimited: false, balance: '10' },
+      })
+    } finally {
+      readRateLimits.mockRestore()
+    }
+  })
+
+  it('redacts quota route errors before returning 503', async () => {
+    const readRateLimits = vi.spyOn(CodexAdapter.prototype, 'readRateLimits')
+      .mockRejectedValueOnce(new Error('Bearer private-token'))
+    try {
+      const ctx = createContext()
+      const webServer = { register: vi.fn() }
+      ctx.inject.mockImplementation((services: readonly string[], callback: (value: unknown) => void) => {
+        if (services[0] === 'webServer') callback({ webServer, effect: (execute: () => unknown) => execute() })
+      })
+      apply(ctx as never, { command: 'codex', cwd: '/workspace' })
+      const route = webServer.register.mock.calls[0]?.[0] as { readonly resource: () => Promise<Response> }
+
+      const response = await route.resource()
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({ error: 'Bearer [REDACTED]' })
+    } finally {
+      readRateLimits.mockRestore()
+    }
+  })
+  it('registers and disposes the my-codex provider through real Cordis composition', async () => {
     const ctx = new Context()
     const llmFiber = await ctx.plugin(LlmRuntime)
-    const pluginFiber = await ctx.plugin(DshCodexPlugin, { cwd: '/workspace' })
+    const pluginFiber = await ctx.plugin(DshCodexPlugin, { command: 'codex', cwd: '/workspace' })
 
     expect(ctx.llm.listProviders()).toContainEqual({
-      id: 'codex',
-      name: 'OpenAI Codex',
+      id: CODEX_PROVIDER,
+      name: 'My Codex',
     })
 
     await pluginFiber.dispose()
-    expect(ctx.llm.listProviders()).not.toContainEqual(expect.objectContaining({ id: 'codex' }))
+    expect(ctx.llm.listProviders()).not.toContainEqual(expect.objectContaining({ id: CODEX_PROVIDER }))
     await llmFiber.dispose()
   })
+})
 
-  it('publishes a resolvable Cordis patch and package entry', async () => {
+describe('package composition metadata', () => {
+  it('publishes the current plugin name, patch and peer contract', async () => {
     const root = process.cwd()
     const patch = await readFile(join(root, 'cordis.patch.yml'), 'utf8')
-    const packageJson = JSON.parse(
-      await readFile(join(root, 'package.json'), 'utf8'),
-    ) as {
+    const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
       readonly name: string
       readonly dsh?: { readonly bundle?: { readonly patch?: string } }
       readonly peerDependencies?: Record<string, string>
@@ -221,12 +261,10 @@ describe('Cordis composition', () => {
     expect(packageJson.name).toBe('@ipedia/dsh-ichuny-codex')
     expect(packageJson.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(packageJson.peerDependencies).toMatchObject({
-      // A literal on purpose, unlike clientInfo.version: this is the published
-      // peer contract, so adding a supported DSH version requires its gates.
       '@deepseek-ai/cordis': '~4.1.0',
-      '@deepseek-ai/dsh-attachment': '0.2.2-rc.1',
-      '@deepseek-ai/dsh-llm': '0.2.2-rc.1',
-      '@deepseek-ai/dsh-session': '0.2.2-rc.1',
+      '@deepseek-ai/dsh-attachment': '0.2.2-rc.1 || 0.2.2-rc.3',
+      '@deepseek-ai/dsh-llm': '0.2.2-rc.1 || 0.2.2-rc.3',
+      '@deepseek-ai/dsh-session': '0.2.2-rc.1 || 0.2.2-rc.3',
     })
     expect(patch).toContain("name: '@ipedia/dsh-ichuny-codex'")
   })

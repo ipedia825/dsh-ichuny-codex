@@ -14,7 +14,7 @@ description: "Builds the current plugin and checks the local package before isol
 ## Prerequisites
 
 - Node.js 22.19 or newer and npm compatible with the lockfile.
-- DSH 0.2.2-rc.1 for the documented integration target.
+- DSH 0.2.2-rc.1 or 0.2.2-rc.3 per the declared peer contract. Both graphs pass project checks; only the rc.1 host has a user-reported live conversation so far. Its pinned Zod version has a high-severity advisory; prefer rc.3 and verify a live client there before release.
 - Codex CLI already authenticated as the same OS user who will run DSH. Use `codex login status` to check it; do not copy or inspect credential files.
 - Optional platform dependencies enabled when installing this package. The default plugin command uses the pinned native `@openai/codex` executable from its dependency tree, not the globally installed CLI. [PATH: src/codex-command.ts]
 
@@ -32,7 +32,7 @@ npm run build
 npm run package:check
 ```
 
-`npm run verify` checks the required files, version synchronization and KB metadata. Its pinned `LICENSE` checksum matches the reviewed local Apache-2.0 text. `npm test` selects only the three files listed in `vitest.config.ts`, not all test files. Build produces `lib/` from `src/`; do not hand-edit it. [PATH: package.json] [PATH: scripts/verify-required-files.mjs] [PATH: vitest.config.ts] [PATH: tsconfig.build.json]
+`npm run verify` checks the required files, version synchronization and KB metadata. Its pinned `LICENSE` checksum matches the reviewed local Apache-2.0 text. `npm test` runs all remaining spec files listed in `vitest.config.ts`. Build produces `lib/` from `src/`; do not hand-edit it. [PATH: package.json] [PATH: scripts/verify-required-files.mjs] [PATH: vitest.config.ts] [PATH: tsconfig.build.json]
 
 For a disposable local artifact after reviewing the package contents:
 

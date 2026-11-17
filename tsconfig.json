@@ -17,6 +17,6 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "tests/core.spec.ts", "tests/attachments.spec.ts", "tests/quota-client.spec.ts", "vitest.config.ts"],
+  "include": ["src/**/*.ts", "tests/core.spec.ts", "tests/attachments.spec.ts", "tests/quota-client.spec.ts", "tests/composition.spec.ts", "tests/adapter-current.spec.ts", "tests/dynamic-tools-current.spec.ts", "tests/app-server/**/*.spec.ts", "tests/session-permissions.spec.ts", "tests/dsh-compat.spec.ts", "vitest.config.ts"],
   "exclude": ["lib", "node_modules", "coverage"]
 }

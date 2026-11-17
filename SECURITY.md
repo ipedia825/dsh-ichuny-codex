@@ -2,9 +2,9 @@
 
 ## Supported versions
 
-The latest published `1.x` release receives security fixes on `main`. Earlier
-releases must upgrade to the latest patch or minor release. See [CHANGELOG.md](CHANGELOG.md)
-for retained release notes.
+Security fixes target the current maintained branch and supported releases as recorded
+in [CHANGELOG.md](CHANGELOG.md). A source build is not a published npm release;
+verify the exact package version and its supported DSH peers before deploying.
 
 ## Reporting a vulnerability
 
@@ -24,7 +24,7 @@ Diagnostics must redact credential-like fields and bearer values. Tests use synt
 
 The plugin starts the local `codex app-server` executable directly and communicates over stdio. It never invokes a shell or interpolates arguments into command strings.
 
-The child receives an explicit cross-platform allowlist only: executable paths, user and Codex homes, temporary and XDG directories, proxy settings, CA paths, locale, terminal, WSL, and Windows platform variables. Ambient project and cloud credentials such as GitHub, AWS, npm, Anthropic, and OpenAI keys are dropped. `allowApiKeyAuth: true` does not widen this environment; it permits only API-key credentials already owned by Codex.
+The child inherits only the environment keys allowlisted by `childEnvironment`: basic user, system and executable paths, temporary paths, proxy settings, `CODEX_HOME`, and `LC_*`. Other ambient project and cloud credentials are dropped. The adapter requires Codex-managed ChatGPT authentication and offers no API-key bypass.
 
 The executable path and arguments are untrusted configuration. Implementations must validate them before process creation. Child processes require startup, request, and shutdown timeouts plus cancellation.
 
@@ -34,13 +34,13 @@ Every app-server response, notification, and server request is untrusted. Runtim
 
 Parsers must bound line size, pending requests, buffered output, and tool-result size. Protocol failures close stdin, send TERM, and escalate to KILL after the bounded shutdown timeout. Incoming server-request handlers use the request timeout and receive an abort signal. A result plus error-reply double failure rejects pending work and closes the client without an unhandled rejection.
 
-In stable mode, valid same-provider replay state may resume a Codex thread after plugin restart. The adapter validates the newest same-provider assistant state and never falls back to an older thread. Dynamic-tool threads are process-local and never resume after restart, even when no call was pending; their replay fails closed with `DYNAMIC_TOOL_REPLAY_UNSUPPORTED`.
+Codex threads are cached only in the running adapter. After a restart, the adapter opens a new thread; it does not restore one from historical replay state.
 
 ### Tool boundary
 
-Experimental dynamic tools are disabled by default. When explicitly enabled, catalog names, descriptions, schemas, arguments, call IDs, pending counts, per-turn counts, result batches, and timeouts are bounded. Results are validated as one atomic batch before any app-server response; text and images are carried, every other block is reduced to a description of itself, and the size bound is enforced over the text. DSH remains the sole tool executor under its normal agent, sandbox, approval, logging, and persistence path.
+The app-server experimental API is enabled by the plugin. When DSH provides tools for a persistent session, the adapter accepts at most 128 tool definitions and 16 pending calls, bounds serialized arguments to 256 KiB, and refuses duplicate or over-256-byte UTF-8 call IDs and already-aborted requests. Tool results must be text-only and are limited to 4 MiB of aggregate UTF-8 text per batch. Missing, duplicate, oversized or non-text results reject the batch before any pending call is answered; the adapter rejects pending calls and interrupts the Codex turn. DSH remains the tool executor under its own permission path. A full JSON Schema fingerprint is not currently checked on an existing thread.
 
-A dynamic-tool thread cannot be restored after process loss. Restart-time continuation fails closed instead of attaching tools or results to an older or different Codex turn. Aborts, handler timeouts, invalid batches, and adapter close reject every pending call and interrupt the Codex turn exactly once.
+Pending calls exist only in the running process. An invalid tool-result batch rejects outstanding calls and attempts to interrupt the Codex turn; adapter close rejects the calls and closes the client. Reinstalling or restarting the plugin does not restore pending calls or the previous thread.
 
 ### Network and telemetry
 

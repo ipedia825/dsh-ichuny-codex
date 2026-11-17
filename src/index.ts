@@ -5,6 +5,7 @@ import z from '@deepseek-ai/schemastery'
 
 import { bundledCodexCommand } from './codex-command.js'
 import { AppServerClient } from './app-server/client.js'
+import { safeErrorMessage } from './app-server/redaction.js'
 import { ChildProcessTransport } from './app-server/transport.js'
 import { CodexAdapter, CODEX_PROVIDER } from './adapter.js'
 import type { JsonObject, JsonValue } from './app-server/types.js'
@@ -78,7 +79,7 @@ export function apply(ctx: Context, config: Config = {}): void {
             headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
           })
         } catch (error) {
-          return new Response(JSON.stringify({ error: error instanceof Error ? error.message : 'Codex rate limits unavailable' }), {
+          return new Response(JSON.stringify({ error: safeErrorMessage(error) }), {
             status: 503,
             headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
           })

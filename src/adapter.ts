@@ -46,7 +46,14 @@ type ThreadState = {
 
 const MAX_DYNAMIC_TOOLS = 128
 const MAX_DYNAMIC_TOOL_ARGUMENT_BYTES = 262_144
+const MAX_DYNAMIC_TOOL_CALL_ID_BYTES = 256
+const MAX_DYNAMIC_TOOL_RESULT_BYTES = 4 * 1024 * 1024
 const DYNAMIC_TOOL_NAME = /^[A-Za-z0-9_-]+$/u
+
+function codexError(message: string, code: string): LlmError {
+  // rc.3 narrows the type, but both SDK constructors accept provider codes at runtime.
+  return new LlmError(message, code as ConstructorParameters<typeof LlmError>[1])
+}
 
 export interface CodexAdapterOptions {
   readonly client: AppServerClient
@@ -127,11 +134,13 @@ export class CodexAdapter extends LlmAdapter {
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.assertProvider(options.provider)
     const input = await this.buildUserInput(options.messages, options.signal)
-    if (input.length === 0) throw new LlmError('Codex request has no user content', 'EMPTY_INPUT')
+    const hasPendingTools = options.sessionId !== undefined
+      && (this.threads.get(String(options.sessionId))?.pendingCalls.size ?? 0) > 0
+    if (input.length === 0 && !hasPendingTools) throw codexError('Codex request has no user content', 'EMPTY_INPUT')
     await this.requireLogin(options.signal)
 
     if ((options.tools?.length ?? 0) > 0 && options.sessionId === undefined) {
-      throw new LlmError('Dynamic tools require a persistent DSH session id', 'DYNAMIC_TOOLS_REQUIRE_SESSION')
+      throw codexError('Dynamic tools require a persistent DSH session id', 'DYNAMIC_TOOLS_REQUIRE_SESSION')
     }
     const key = options.sessionId === undefined ? `ephemeral:${randomUUID()}` : String(options.sessionId)
     let state = this.threads.get(key)
@@ -156,11 +165,11 @@ export class CodexAdapter extends LlmAdapter {
     } else if ((options.tools?.length ?? 0) > 0) {
       const names = new Set((options.tools ?? []).map((tool) => tool.name))
       if (names.size !== state.toolNames.size || [...names].some((name) => !state?.toolNames.has(name))) {
-        throw new LlmError('Dynamic tool catalog changed after the Codex thread started', 'DYNAMIC_TOOL_SCHEMA_DRIFT')
+        throw codexError('Dynamic tool catalog changed after the Codex thread started', 'DYNAMIC_TOOL_SCHEMA_DRIFT')
       }
     }
 
-    if (state === undefined) throw new LlmError('Codex thread state was not created', 'CODEX_THREAD_STATE')
+    if (state === undefined) throw codexError('Codex thread state was not created', 'CODEX_THREAD_STATE')
     const activeState: ThreadState = state
     if (activeState.unsubscribe === undefined) {
       activeState.unsubscribe = this.client.onNotification((notification) => {
@@ -175,7 +184,18 @@ export class CodexAdapter extends LlmAdapter {
     let turnId = activeState.turnId ?? ''
     try {
       if (activeState.pendingCalls.size > 0) {
-        resolveToolResults(activeState.pendingCalls, options.messages)
+        try {
+          resolveToolResults(activeState.pendingCalls, options.messages)
+        } catch (error) {
+          const failure = error instanceof Error ? error : codexError(safeErrorMessage(error), 'DYNAMIC_TOOL_RESULT_INVALID')
+          for (const pending of [...activeState.pendingCalls.values()]) {
+            if (!pending.responded) pending.reject(failure)
+          }
+          activeState.pendingCalls.clear()
+          activeState.turnId = undefined
+          await this.interrupt(activeState.threadId, turnId)
+          throw failure
+        }
       } else {
         const turn = await this.client.startTurn(
           {
@@ -243,7 +263,7 @@ export class CodexAdapter extends LlmAdapter {
       }
     } catch (error) {
       if (options.signal?.aborted) throw new LlmError('Codex request was aborted', 'ABORTED')
-      throw error instanceof LlmError ? error : new LlmError(safeErrorMessage(error), 'CODEX_APP_SERVER')
+      throw error instanceof LlmError ? error : codexError(safeErrorMessage(error), 'CODEX_APP_SERVER')
     } finally {
       options.signal?.removeEventListener('abort', abort)
       if (activeState.pendingCalls.size === 0 || options.sessionId === undefined) {
@@ -261,6 +281,7 @@ export class CodexAdapter extends LlmAdapter {
     const input: CodexUserInput[] = []
     const store = this.attachments?.()
     for (const message of messages) {
+      if (message.role === 'tool') continue
       for (const block of message.content) {
         if (block.type === 'text') {
           if (block.text.length > 0) input.push({ type: 'text', text: block.text })
@@ -287,7 +308,7 @@ export class CodexAdapter extends LlmAdapter {
   async close(): Promise<void> {
     this.unregisterServerRequestHandler()
     for (const state of this.threads.values()) {
-      for (const pending of state.pendingCalls.values()) pending.reject(new LlmError('Codex adapter closed', 'ADAPTER_CLOSED'))
+      for (const pending of state.pendingCalls.values()) pending.reject(codexError('Codex adapter closed', 'ADAPTER_CLOSED'))
       state.unsubscribe?.()
     }
     this.threads.clear()
@@ -297,14 +318,17 @@ export class CodexAdapter extends LlmAdapter {
 
 
   private handleServerRequest(request: AppServerRequest, signal: AbortSignal): Promise<JsonValue> {
-    if (request.method !== 'item/tool/call') return Promise.reject(new LlmError(`Unsupported Codex server request: ${request.method}`, 'UNSUPPORTED_SERVER_REQUEST'))
+    if (request.method !== 'item/tool/call') return Promise.reject(codexError(`Unsupported Codex server request: ${request.method}`, 'UNSUPPORTED_SERVER_REQUEST'))
     const call = parseExperimentalDynamicToolCall(request.params)
     const state = [...this.threads.values()].find((candidate) => candidate.threadId === call.threadId)
-    if (state === undefined || state.turnId !== call.turnId) return Promise.reject(new LlmError('Dynamic tool call has no active DSH thread', 'DYNAMIC_TOOL_STATE_LOST'))
-    if (!state.toolNames.has(call.tool)) return Promise.reject(new LlmError(`Codex requested unknown dynamic tool "${call.tool}"`, 'DYNAMIC_TOOL_UNKNOWN'))
-    if (state.pendingCalls.size >= 16) return Promise.reject(new LlmError('Dynamic tool pending-call limit exceeded', 'DYNAMIC_TOOL_PENDING_LIMIT'))
+    if (state === undefined || state.turnId !== call.turnId) return Promise.reject(codexError('Dynamic tool call has no active DSH thread', 'DYNAMIC_TOOL_STATE_LOST'))
+    if (!state.toolNames.has(call.tool)) return Promise.reject(codexError(`Codex requested unknown dynamic tool "${call.tool}"`, 'DYNAMIC_TOOL_UNKNOWN'))
+    if (Buffer.byteLength(call.callId, 'utf8') > MAX_DYNAMIC_TOOL_CALL_ID_BYTES) return Promise.reject(codexError('Dynamic tool call id is too large', 'DYNAMIC_TOOL_CALL_ID_TOO_LARGE'))
+    if (state.pendingCalls.has(call.callId)) return Promise.reject(codexError('Duplicate dynamic tool call id', 'DYNAMIC_TOOL_DUPLICATE'))
+    if (signal.aborted) return Promise.reject(new LlmError('Dynamic tool call was aborted', 'ABORTED'))
+    if (state.pendingCalls.size >= 16) return Promise.reject(codexError('Dynamic tool pending-call limit exceeded', 'DYNAMIC_TOOL_PENDING_LIMIT'))
     const argumentText = JSON.stringify(call.arguments)
-    if (Buffer.byteLength(argumentText, 'utf8') > MAX_DYNAMIC_TOOL_ARGUMENT_BYTES) return Promise.reject(new LlmError('Dynamic tool arguments are too large', 'DYNAMIC_TOOL_ARGUMENTS_TOO_LARGE'))
+    if (Buffer.byteLength(argumentText, 'utf8') > MAX_DYNAMIC_TOOL_ARGUMENT_BYTES) return Promise.reject(codexError('Dynamic tool arguments are too large', 'DYNAMIC_TOOL_ARGUMENTS_TOO_LARGE'))
     return new Promise<JsonValue>((resolve, reject) => {
       const onAbort = (): void => {
         state.pendingCalls.delete(call.callId)
@@ -338,7 +362,7 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   private assertProvider(provider: string): void {
-    if (provider !== CODEX_PROVIDER) throw new LlmError(`Unknown provider: ${provider}`, 'INVALID_PROVIDER')
+    if (provider !== CODEX_PROVIDER) throw codexError(`Unknown provider: ${provider}`, 'INVALID_PROVIDER')
   }
 
   private async interrupt(threadId: string, turnId: string): Promise<void> {
@@ -348,30 +372,35 @@ export class CodexAdapter extends LlmAdapter {
 }
 
 function buildToolSpecs(tools: readonly ToolSchema[]): readonly ExperimentalDynamicToolSpec[] {
-  if (tools.length > MAX_DYNAMIC_TOOLS) throw new LlmError(`Dynamic tool catalog exceeds ${MAX_DYNAMIC_TOOLS} tools`, 'DYNAMIC_TOOL_CATALOG_LIMIT')
+  if (tools.length > MAX_DYNAMIC_TOOLS) throw codexError(`Dynamic tool catalog exceeds ${MAX_DYNAMIC_TOOLS} tools`, 'DYNAMIC_TOOL_CATALOG_LIMIT')
   return tools.map((tool) => {
-    if (!DYNAMIC_TOOL_NAME.test(tool.name)) throw new LlmError(`Invalid dynamic tool name: ${tool.name}`, 'DYNAMIC_TOOL_NAME_INVALID')
-    if (!isJsonValue(tool.parameters) || Array.isArray(tool.parameters)) throw new LlmError(`Invalid schema for dynamic tool: ${tool.name}`, 'DYNAMIC_TOOL_SCHEMA_INVALID')
+    if (!DYNAMIC_TOOL_NAME.test(tool.name)) throw codexError(`Invalid dynamic tool name: ${tool.name}`, 'DYNAMIC_TOOL_NAME_INVALID')
+    if (!isJsonValue(tool.parameters) || Array.isArray(tool.parameters)) throw codexError(`Invalid schema for dynamic tool: ${tool.name}`, 'DYNAMIC_TOOL_SCHEMA_INVALID')
     return { type: 'function', name: tool.name, description: tool.description, inputSchema: tool.parameters as JsonObject }
   })
 }
 
 function resolveToolResults(pending: Map<string, PendingToolCall>, messages: readonly RequestMessage[]): void {
-  const results = messages
-    .map((message) => message as unknown as Record<string, unknown>)
-    .filter((message) => message['role'] === 'tool')
-  for (const raw of results) {
-    const callId = typeof raw['toolCallId'] === 'string' ? raw['toolCallId'] : typeof (raw['source'] as Record<string, unknown> | undefined)?.['callId'] === 'string' ? (raw['source'] as Record<string, unknown>)['callId'] as string : ''
-    const call = pending.get(callId)
+  const batch = new Map<string, { readonly call: PendingToolCall; readonly result: ExperimentalDynamicToolResult }>()
+  let totalBytes = 0
+  for (const message of messages) {
+    if (message.role !== 'tool') continue
+    const call = pending.get(message.toolCallId)
     if (call === undefined || call.responded) continue
-    const content = Array.isArray(raw['content']) ? raw['content'] : []
-    const text = content.map((block) => {
-      const value = block as Record<string, unknown>
-      return value['type'] === 'text' && typeof value['text'] === 'string' ? value['text'] : ''
-    }).join('')
-    call.resolve({ contentItems: [{ type: 'inputText', text }], success: raw['isError'] !== true })
+    if (batch.has(call.callId)) throw codexError(`Duplicate dynamic tool result: ${call.callId}`, 'DYNAMIC_TOOL_RESULT_DUPLICATE')
+    let text = ''
+    for (const block of message.content) {
+      if (block.type !== 'text') throw codexError('Dynamic tool results must contain only text blocks', 'DYNAMIC_TOOL_RESULT_UNSUPPORTED')
+      totalBytes += Buffer.byteLength(block.text, 'utf8')
+      if (totalBytes > MAX_DYNAMIC_TOOL_RESULT_BYTES) throw codexError('Dynamic tool result batch is too large', 'DYNAMIC_TOOL_RESULT_TOO_LARGE')
+      text += block.text
+    }
+    batch.set(call.callId, { call, result: { contentItems: [{ type: 'inputText', text }], success: message.isError !== true } })
   }
-  if ([...pending.values()].some((call) => !call.responded)) throw new LlmError(`Missing dynamic tool results for ${pending.size} call(s)`, 'DYNAMIC_TOOL_RESULT_MISSING')
+  if ([...pending.values()].some((call) => !call.responded && !batch.has(call.callId))) {
+    throw codexError(`Missing dynamic tool results for ${pending.size} call(s)`, 'DYNAMIC_TOOL_RESULT_MISSING')
+  }
+  for (const { call, result } of batch.values()) call.resolve(result)
 }
 
 function dynamicResultJson(result: ExperimentalDynamicToolResult): JsonObject {
