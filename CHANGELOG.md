@@ -4,6 +4,12 @@ All notable changes from 2026-11-14 onward are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.10] - 2026-11-17
+
+### Fixed
+
+- Removed the required `@deepseek-ai/dsh-host-webserver` peer: WebServer is provided by the DSH host and injected optionally, so profile-level pnpm installs must not report it as a missing plugin peer. The package remains a development-only type dependency.
+
 ## [1.7.9] - 2026-11-17
 
 ### Changed

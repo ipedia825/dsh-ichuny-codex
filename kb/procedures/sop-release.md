@@ -2,7 +2,7 @@
 title: "SOP: Release Readiness"
 category: procedures
 service: dsh-ichuny-codex
-version: "1.7.9"
+version: "1.7.10"
 tags: [sop, release, npm, provenance, packaging]
 created: "2026-08-26"
 last_updated: "2026-11-16"

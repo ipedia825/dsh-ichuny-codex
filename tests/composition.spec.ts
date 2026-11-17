@@ -255,6 +255,7 @@ describe('package composition metadata', () => {
       readonly name: string
       readonly dsh?: { readonly bundle?: { readonly patch?: string } }
       readonly peerDependencies?: Record<string, string>
+      readonly devDependencies?: Record<string, string>
     }
 
     expect(name).toBe('dsh-ichuny-codex')
@@ -266,6 +267,8 @@ describe('package composition metadata', () => {
       '@deepseek-ai/dsh-llm': '0.2.2-rc.1 || 0.2.2-rc.3',
       '@deepseek-ai/dsh-session': '0.2.2-rc.1 || 0.2.2-rc.3',
     })
+    expect(packageJson.peerDependencies?.['@deepseek-ai/dsh-host-webserver']).toBeUndefined()
+    expect(packageJson.devDependencies?.['@deepseek-ai/dsh-host-webserver']).toBe('0.2.2-rc.3')
     expect(patch).toContain("name: '@ipedia/dsh-ichuny-codex'")
   })
 })

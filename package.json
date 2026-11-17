@@ -1,6 +1,6 @@
 {
   "name": "@ipedia/dsh-ichuny-codex",
-  "version": "1.7.9",
+  "version": "1.7.10",
   "description": "DeepSeek Harness provider plugin that delegates ChatGPT subscription access and agent execution to the locally authenticated Codex app server.",
   "keywords": [
     "deepseek-harness",
@@ -101,8 +101,7 @@
     "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-attachment": "0.2.2-rc.1 || 0.2.2-rc.3",
     "@deepseek-ai/dsh-llm": "0.2.2-rc.1 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-session": "0.2.2-rc.1 || 0.2.2-rc.3",
-    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.1 || 0.2.2-rc.3"
+    "@deepseek-ai/dsh-session": "0.2.2-rc.1 || 0.2.2-rc.3"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
