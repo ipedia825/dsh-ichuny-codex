@@ -15,7 +15,19 @@ By default, the plugin runs the native Codex executable from its pinned dependen
 
 ## Install
 
-This repository supports **building from source and installing a local package**. GitHub does not contain the generated `lib/` directory, so installing the repository URL directly as if it were a built plugin will not work. For Windows PowerShell and the DSH `web` profile:
+### Quick install
+
+Install the published npm package into the DSH `web` profile:
+
+```powershell
+dsh plugin --profile web add @ipedia/dsh-ichuny-codex --ignore-scripts --workspace-root
+```
+
+Restart `dsh web` after installation, then select **My Codex** in the model selector. This command installs npm's `latest`; to pin a version, use `@ipedia/dsh-ichuny-codex@1.7.9` and add `--save-exact`.
+
+### Install from source
+
+GitHub does not contain the generated `lib/` directory. Build and pack the source before installing it; do not use the repository URL as if it were a built plugin. For Windows PowerShell:
 
 ```powershell
 git clone https://github.com/ipedia825/dsh-ichuny-codex.git
@@ -31,7 +43,7 @@ dsh plugin --profile web add "file:$((Get-Location).Path)\$plugin" --save-exact 
 
 ### Requirements
 
-- Node.js 22.19 or newer. The peer contract supports DSH `0.2.2-rc.1` and `0.2.2-rc.3`. Both dependency graphs passed typechecking, the configured tests, and build; the reported live conversation used an rc.1 host, while rc.3 still needs real-client validation. The Zod version pinned by the rc.1 host has a high-severity advisory, so upgrade to rc.3 when possible.
+- Node.js 22.19 or newer. The peer contract supports DSH `0.2.2-rc.1` and `0.2.2-rc.3`. Both dependency graphs passed typechecking, the remaining tests, and build, and the rc.3 host received an actual **My Codex** reply after installation. The Zod version pinned by the rc.1 host has a high-severity advisory, so upgrade to rc.3 when possible.
 - Keep optional dependencies enabled so that `@openai/codex@0.169.0` installs its native executable for your platform.
 - Sign in to Codex CLI with ChatGPT as the same OS user who runs DSH. Check with `codex login status`. A global CLI can check sign-in status, but its version does not determine the bundled executable version.
 
@@ -66,6 +78,6 @@ npm run audit:permissions
 npm run package:check
 ```
 
-`npm test` runs all 12 remaining spec files selected in [vitest.config.ts](vitest.config.ts), including adapter, dynamic-tool, and Cordis composition tests. A successful build, package check, or test run still does not establish an authenticated rc.3 conversation through the target DSH host. For implementation details and troubleshooting, see [Architecture](kb/reference/architecture.md), [Configuration](kb/reference/configuration.md), and [Common issues](kb/troubleshooting/common-issues.md).
+`npm test` runs all 12 remaining spec files selected in [vitest.config.ts](vitest.config.ts), including adapter, dynamic-tool, and Cordis composition tests. Build, package checks, and automated tests do not replace a conversation through the target DSH host; the rc.3 **My Codex** reply was confirmed by the user. For implementation details and troubleshooting, see [Architecture](kb/reference/architecture.md), [Configuration](kb/reference/configuration.md), and [Common issues](kb/troubleshooting/common-issues.md).
 
 Licensed under Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for license terms and upstream attribution.

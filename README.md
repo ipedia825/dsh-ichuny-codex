@@ -15,7 +15,19 @@
 
 ## 安装
 
-目前仓库提供**从源码构建并安装本地包**的流程。GitHub 仓库不包含 `lib/`，所以不能将仓库 URL 直接当作已构建的插件包安装。下面以 Windows PowerShell 和 DSH `web` profile 为例：
+### 快速安装
+
+已发布版本可直接通过 npm 包名安装到 DSH `web` profile：
+
+```powershell
+dsh plugin --profile web add @ipedia/dsh-ichuny-codex --ignore-scripts --workspace-root
+```
+
+安装完成后重启 `dsh web`，在模型选择器中选择 `My Codex`。上述命令安装 npm 的 `latest`；如需固定版本，可将包名改为 `@ipedia/dsh-ichuny-codex@1.7.9` 并添加 `--save-exact`。
+
+### 从源码安装
+
+GitHub 仓库不提交生成的 `lib/`，从源码安装时需先构建并打包；不要直接把仓库 URL 当作已构建的插件包。下面以 Windows PowerShell 为例：
 
 ```powershell
 git clone https://github.com/ipedia825/dsh-ichuny-codex.git
@@ -31,7 +43,7 @@ dsh plugin --profile web add "file:$((Get-Location).Path)\$plugin" --save-exact 
 
 ### 运行条件
 
-- Node.js 22.19 或更高版本；peer 声明支持 DSH `0.2.2-rc.1` 和 `0.2.2-rc.3`。两套依赖已分别通过类型检查、当前测试和构建；已完成的真实对话仅来自 rc.1 宿主的用户报告，rc.3 仍需真实客户端验证。rc.1 宿主固定的旧 Zod 版本仍有高危安全公告，建议尽可能升级至 rc.3。
+- Node.js 22.19 或更高版本；peer 声明支持 DSH `0.2.2-rc.1` 和 `0.2.2-rc.3`。两套依赖已分别通过类型检查、现存测试和构建；rc.3 宿主还完成了安装并收到一次 `My Codex` 实际回复。rc.1 宿主固定的旧 Zod 版本仍有高危安全公告，建议尽可能升级至 rc.3。
 - 安装依赖时保持 optional dependencies 启用，以便安装 `@openai/codex@0.169.0` 对应平台的原生程序。
 - 运行 DSH 的同一系统用户已通过 Codex CLI 完成 ChatGPT 登录。可运行 `codex login status` 检查；全局 CLI 仅用于检查登录，不决定插件内置程序的版本。
 
@@ -66,6 +78,6 @@ npm run audit:permissions
 npm run package:check
 ```
 
-`npm test` 运行 [vitest.config.ts](vitest.config.ts) 选中的全部 12 个现存 spec 文件，包含 adapter、动态工具和 Cordis 组合测试。构建、打包及这些测试通过，仍不等于已在目标 DSH 宿主中完成 rc.3 的真实对话烟测。实现边界与进一步的排障说明见 [架构](kb/reference/architecture.md)、[配置](kb/reference/configuration.md) 和 [常见问题](kb/troubleshooting/common-issues.md)。
+`npm test` 运行 [vitest.config.ts](vitest.config.ts) 选中的全部 12 个现存 spec 文件，包含 adapter、动态工具和 Cordis 组合测试。构建、打包和这些自动测试不替代目标 DSH 宿主的实际对话验证；rc.3 的 `My Codex` 实际回复已由用户确认。实现边界与进一步的排障说明见 [架构](kb/reference/architecture.md)、[配置](kb/reference/configuration.md) 和 [常见问题](kb/troubleshooting/common-issues.md)。
 
 Apache-2.0 许可及原作者归属见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。
