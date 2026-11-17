@@ -9,7 +9,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const licenseSha256 = '1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6';
+const licenseSha256 = 'c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4';
 const requiredFiles = [
   'LICENSE',
   'NOTICE',
@@ -40,7 +40,7 @@ if (missing.length > 0) {
   console.error(`Missing required files: ${missing.join(', ')}`);
   process.exitCode = 1;
 } else {
-  const license = await readFile(resolve(root, 'LICENSE'));
+  const license = (await readFile(resolve(root, 'LICENSE'), 'utf8')).replaceAll('\r\n', '\n');
   const actualSha256 = createHash('sha256').update(license).digest('hex');
   if (actualSha256 !== licenseSha256) {
     console.error(`LICENSE sha256 mismatch: ${actualSha256}`);

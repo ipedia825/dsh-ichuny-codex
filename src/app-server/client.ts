@@ -69,7 +69,7 @@ const MAX_MODEL_PAGES = 100
 const DEFAULT_CLIENT_INFO: AppServerClientInfo = {
   name: 'softspark_dsh_codex',
   title: 'SoftSpark DSH Codex',
-  version: '1.7.8',
+  version: '1.7.9',
 }
 
 export class AppServerRpcError extends Error {
