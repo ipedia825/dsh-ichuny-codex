@@ -23,7 +23,7 @@
 dsh plugin --profile web add @ipedia/dsh-ichuny-codex --ignore-scripts --workspace-root
 ```
 
-安装完成后重启 `dsh web`，在模型选择器中选择 `My Codex`。上述命令安装 npm 的 `latest`；如需固定版本，可将包名改为 `@ipedia/dsh-ichuny-codex@1.7.9` 并添加 `--save-exact`。
+安装完成后重启 `dsh web`，在模型选择器中选择 `My Codex`。上述命令安装 npm 的 `latest`；如需在 `1.7.14` 发布后固定该版本，可使用 `@ipedia/dsh-ichuny-codex@1.7.14` 并添加 `--save-exact`。尚未发布时，可按下文从源码构建并安装本地包。
 
 ### 从源码安装
 

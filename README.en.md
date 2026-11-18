@@ -23,7 +23,7 @@ Install the published npm package into the DSH `web` profile:
 dsh plugin --profile web add @ipedia/dsh-ichuny-codex --ignore-scripts --workspace-root
 ```
 
-Restart `dsh web` after installation, then select **My Codex** in the model selector. This command installs npm's `latest`; to pin a version, use `@ipedia/dsh-ichuny-codex@1.7.9` and add `--save-exact`.
+Restart `dsh web` after installation, then select **My Codex** in the model selector. This command installs npm's `latest`; after `1.7.14` is published, pin it with `@ipedia/dsh-ichuny-codex@1.7.14` and `--save-exact`. Before publication, build and install the local package as described below.
 
 ### Install from source
 
