@@ -265,6 +265,12 @@ describe('AppServerClient', () => {
     })
     transport.emitMessage({ id: 2, result: { thread: { id: 'thread-tools' } } })
     await expect(startedThread).resolves.toEqual({ id: 'thread-tools' })
+
+    const resumed = client.resumeThread({ threadId: 'thread-tools', dynamicTools: [] })
+    await flushMicrotasks()
+    expect(transport.messageAt(3)).toEqual({ id: 3, method: 'thread/resume', params: { threadId: 'thread-tools', dynamicTools: [] } })
+    transport.emitMessage({ id: 3, result: { thread: { id: 'thread-tools' } } })
+    await expect(resumed).resolves.toEqual({ id: 'thread-tools' })
     await client.close()
   })
 

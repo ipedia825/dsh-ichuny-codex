@@ -2,7 +2,7 @@
 title: "dsh-ichuny-codex Security Model"
 category: reference
 service: dsh-ichuny-codex
-version: "1.7.7"
+version: "1.7.14"
 tags: [security, credentials, subprocess, json-rpc, tools]
 created: "2026-08-26"
 last_updated: "2026-11-16"
@@ -23,9 +23,9 @@ Untrusted app-server JSONL is framed and runtime-validated before use. The trans
 
 ## DSH tools and approvals
 
-The app-server connection enables its experimental API. Tools are offered when DSH supplies them on a request with `sessionId`; there is no plugin-level opt-in switch. The adapter does not run DSH tools itself: it emits tool-call stream blocks and returns correlated text results after DSH executes them. Current limits cover 128 tool definitions, 16 pending calls, 256 KiB serialized arguments, 256-byte UTF-8 call IDs and 4 MiB aggregate UTF-8 text results. Duplicate or pre-aborted incoming calls are rejected before registration. Duplicate, missing, oversized and non-text results fail the batch before any pending call is answered; failures reject pending requests and interrupt the turn. The catalog check still does not establish a full schema fingerprint. Configure Codex sandbox and approval policy explicitly for the intended host; the separate `resolveSessionPermissions` helper is not applied by the current plugin entry. [PATH: src/index.ts] [PATH: src/adapter.ts] [PATH: src/session-permissions.ts]
+The app-server connection enables its experimental API. Tools are offered when DSH supplies them on a request with `sessionId`; there is no plugin-level opt-in switch. The adapter does not run DSH tools itself: it emits tool-call stream blocks and returns correlated text and stored image results after DSH executes them. Tool images are read only through the optional DSH attachment store. Current limits cover 128 tool definitions, 16 unanswered calls, 256 KiB serialized arguments, 256-byte UTF-8 call IDs, eight tool-result images and 4 MiB aggregate encoded UTF-8 results. Duplicate or pre-aborted incoming calls are rejected before registration. Duplicate, missing, oversized and unsupported blocks fail the batch before any pending call is answered; failures reject pending requests and interrupt the turn. Tool catalogs are compared with a canonical full-schema fingerprint between completed turns and refreshed with `thread/resume` when needed. Configure Codex sandbox and approval policy explicitly for the intended host; the separate `resolveSessionPermissions` helper is not applied by the current plugin entry. [PATH: src/index.ts] [PATH: src/adapter.ts] [PATH: src/session-permissions.ts]
 
-Threads live only in an in-process map. A restart loses their state; no replay-state parser or automatic `thread/resume` path runs in the adapter. [PATH: src/adapter.ts]
+Successful assistant replies persist only the Codex thread ID and last consumed DSH user message ID in adapter-private replay metadata, not credentials or user text. A fresh adapter may resume that thread; older replies without metadata cannot be recovered, and an invalid replay or missing safe cursor fails closed. Pending tool calls remain in-memory and cannot be resumed across a restart. [PATH: src/adapter.ts]
 
 ## Web quota route
 

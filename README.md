@@ -61,7 +61,7 @@ dsh plugin --profile web add "file:$((Get-Location).Path)\$plugin" --save-exact 
 | `approvalPolicy` | `untrusted` | Codex 审批策略：`never`、`on-request`、`untrusted` |
 | `requestTimeoutMs` | `30000` | 单个 app-server 请求超时，范围 1000–300000 毫秒 |
 
-文本对话无需附件服务。图片由 DSH 附件存储读取并转成 data URL；文件以只读路径描述交给 Codex，而不是由插件直接读取任意文件。动态工具由 DSH 执行，当前只接受文本工具结果，整批结果以 UTF-8 计不超过 4 MiB；重复、缺失、超限或非文本结果会拒绝整个待答批次。Codex 线程仅保存在插件进程内，重启后不会自动恢复原有线程。
+文本对话无需附件服务。图片由 DSH 附件存储读取并转成 data URL；文件以只读路径描述交给 Codex，而不是由插件直接读取任意文件。动态工具由 DSH 执行，支持文本以及来自 DSH 附件存储的图片工具结果（如 `read_image`）；图片经请求投影后作为 Codex `inputImage` 回传，文本不丢失，整批编码后内容以 UTF-8 计不超过 4 MiB。同轮已到达的并发调用会一同交给 DSH，之后才到达的调用留到下一步，只有确实交给 DSH 的调用才要求在本次续接中回传结果。重复、缺失、超限或非文本结果会拒绝已暴露调用的待答批次。已完成的 Codex turn 若遇到 DSH 工具目录增删或 schema 变动，会在下一轮通过 `thread/resume` 更新工具声明；等待工具结果期间保留原目录直至该轮完成。每个 DSH 会话在插件进程中复用同一个 Codex thread；下一轮仅发送游标之后的新 `user` 消息，不再把历史系统指令或 assistant 回复当作新用户输入。新建 thread 时系统提示进入 Codex thread 指令。成功完成的回复把非敏感的 thread ID 和消息游标保存在 DSH replay 元数据中，插件重启后会尝试 `thread/resume`；旧版本已完成的回复没有此元数据，或压缩后游标与回复边界都消失时，无法安全恢复。恢复失败会报错，不会静默新建另一个 thread。
 
 Web 额度控件仅在选择 `my-codex` 时出现。插件通过 `/api/dsh-ichuny-codex/rate-limits` 返回选定的额度字段，成功响应不包含账户 ID；错误消息会经过凭据样式脱敏后返回，但部署到非受信任环境前仍应审查访问控制。额度详情由 Codex 返回的数据决定，无法获取时控件会隐藏。
 

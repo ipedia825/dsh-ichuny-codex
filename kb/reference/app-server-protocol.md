@@ -2,7 +2,7 @@
 title: "Codex App-Server Protocol Surface"
 category: reference
 service: dsh-ichuny-codex
-version: "1.7.7"
+version: "1.7.14"
 tags: [codex, app-server, json-rpc, protocol, streaming]
 created: "2026-08-26"
 last_updated: "2026-11-16"
@@ -24,11 +24,11 @@ The plugin starts the pinned native Codex executable directly with `app-server -
 | `turn/start` | Send user input and selected model/reasoning effort. |
 | `turn/interrupt` | Attempt to interrupt an aborted turn. |
 
-`AppServerClient` also exposes `thread/resume`, but the current adapter does not call it or persist thread IDs across a restart. [PATH: src/app-server/client.ts] [PATH: src/adapter.ts]
+`AppServerClient` exposes `thread/resume`. The adapter uses it between completed turns when tool declarations differ, and after plugin reload when the latest matching DSH assistant reply has validated adapter replay metadata. Successful replies persist a non-secret thread ID and last consumed DSH user-message ID; only new user-role messages are sent to `turn/start`. Failed resumes do not silently create replacement threads. Pending tool calls remain in memory and are answered with their original catalog before any directory update. [PATH: src/app-server/client.ts] [PATH: src/adapter.ts]
 
 ## Stream and server requests
 
-The adapter handles `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `thread/tokenUsage/updated`, and `turn/completed`. With DSH tools present, `item/tool/call` becomes a DSH tool call. DSH runs the tool; the adapter correlates the following tool messages and responds with text content. Non-text tool-result blocks are rejected rather than silently dropped. The current adapter limits tool catalogs to 128 entries, concurrent pending calls to 16, serialized arguments to 256 KiB, UTF-8 call IDs to 256 bytes and aggregate UTF-8 text results to 4 MiB. Duplicate and already-aborted incoming tool requests are rejected before registration. It rejects duplicate and missing pending results before answering any call, and interrupts the turn on an invalid batch. It rejects changed sets of tool names after starting a thread but does not compare full schemas on subsequent requests. The server-request timeout defaults to `requestTimeoutMs` and is cancellable; there is no independent plugin-facing tool timeout. [PATH: src/adapter.ts] [PATH: src/app-server/client.ts]
+The adapter handles `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `thread/tokenUsage/updated`, and `turn/completed`. With DSH tools present, `item/tool/call` becomes a DSH tool call. DSH runs the tool; the adapter correlates the following tool messages and responds with ordered `inputText` and `inputImage` content. Image references must resolve through DSH's attachment store and are request-projected to data URLs; unsupported blocks and unavailable images fail the batch before any server request is answered. The current adapter limits tool catalogs to 128 entries, concurrent pending calls to 16, serialized arguments to 256 KiB, UTF-8 call IDs to 256 bytes, eight result images and aggregate encoded UTF-8 result content to 4 MiB. Duplicate and already-aborted incoming tool requests are rejected before registration. It emits every currently arrived dynamic call in the same DSH stream step; calls that arrive after that batch are emitted on a later step. Only calls actually exposed to DSH are required in the next result batch. Missing results for exposed calls still reject the batch atomically and interrupt the turn. It validates the complete catalog at each completed turn boundary, canonicalizes schema key order, and uses `thread/resume` for real changes. It never changes the catalog while a DSH tool result is pending. The server-request timeout defaults to `requestTimeoutMs` and is cancellable; there is no independent plugin-facing tool timeout. [PATH: src/adapter.ts] [PATH: src/app-server/client.ts]
 
 ## Validation and failure
 

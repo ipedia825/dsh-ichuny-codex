@@ -2,7 +2,7 @@
 title: "dsh-ichuny-codex Architecture"
 category: reference
 service: dsh-ichuny-codex
-version: "1.7.7"
+version: "1.7.14"
 tags: [architecture, dsh, codex, json-rpc, stdio, web]
 created: "2026-11-14"
 last_updated: "2026-11-16"
@@ -18,14 +18,14 @@ description: "Describes the current provider, app-server transport, attachment h
 1. The plugin resolves the native executable from its pinned `@openai/codex` platform package unless `command` overrides it. It starts `codex app-server --listen stdio://` directly with `shell: false` and a restricted environment. \[PATH: src/codex-command.ts] \[PATH: src/app-server/transport.ts]
 2. `AppServerClient` initializes JSON-RPC over JSONL with `experimentalApi: true`, reads Codex-owned account status, and discovers models. The adapter requires an authenticated `chatgpt` account; it never reads credentials. \[PATH: src/index.ts] \[PATH: src/app-server/client.ts] \[PATH: src/adapter.ts]
 3. `CodexAdapter` converts DSH user text, image and file blocks to Codex inputs, streams text and reasoning deltas, usage, tool calls and finish status. Images use the optional attachment store and become data URLs. Files become read-only path descriptions for Codex to access through its own tools. \[PATH: src/adapter.ts]
-4. When DSH supplies tools, the adapter registers up to 128 tool schemas on a new Codex thread. An incoming `item/tool/call` becomes a DSH tool-call stream; DSH executes it and the next adapter invocation supplies matching text results. Tools require a persistent DSH session ID. There is no plugin configuration switch to disable the experimental API or this per-request tool path. \[PATH: src/adapter.ts]
+4. When DSH supplies tools, the adapter registers up to 128 tool schemas on a new Codex thread. An incoming `item/tool/call` becomes a DSH tool-call stream; DSH executes it and the next adapter invocation supplies matching text and image results from the attachment store. Tools require a persistent DSH session ID. There is no plugin configuration switch to disable the experimental API or this per-request tool path. \[PATH: src/adapter.ts]
 5. The optional web server serves a sanitized `account/rateLimits/read` summary at `/api/dsh-ichuny-codex/rate-limits`. The Web client shows 5-hour and weekly remaining quota in the conversation composer only while `my-codex` is selected, with a five-minute cache. \[PATH: src/index.ts] \[PATH: client.js]
 
 ## State and limits
 
-Codex threads are stored in an in-process map keyed by DSH session ID, or by an ephemeral ID for one-off calls. The adapter does not serialize replay state or call `thread/resume`; a plugin restart loses that map. Reusing a session after restart starts a new Codex thread, so do not promise cross-process conversation recovery. \[PATH: src/adapter.ts]
+Codex threads are cached by DSH session ID within a process. Each acknowledged `turn/start` records the last user message ID; later turns only project user-role messages after that cursor. System text on a newly created thread is supplied as `baseInstructions`, never replayed as user text. Successful replies persist the Codex thread ID and cursor in DSH assistant replay state, allowing a later adapter generation to call `thread/resume`. Old assistant messages without replay state and histories with neither a cursor nor a safe assistant boundary cannot recover the prior thread. A completed in-memory thread is also resumed with updated `dynamicTools` when the DSH catalog changes. \[PATH: src/adapter.ts]
 
-Tool limits include 128 catalog entries, 16 concurrent pending calls, 256 KiB per serialized argument payload, 256-byte UTF-8 call IDs and 4 MiB aggregate UTF-8 text results. Duplicate or already-aborted incoming calls are refused before registration. Duplicate, missing, oversized and non-text results fail the batch before any pending call is answered; failures reject pending calls and interrupt the turn. A changed set of tool names is rejected on an existing thread, but the check does not compare complete schemas. Server requests are bounded by the client timeout and cancellation. \[PATH: src/adapter.ts] \[PATH: src/app-server/client.ts]
+Tool limits include 128 catalog entries, 16 concurrent unanswered calls, 256 KiB per serialized argument payload, 256-byte UTF-8 call IDs, eight images and 4 MiB aggregate encoded UTF-8 tool results. Duplicate or already-aborted incoming calls are refused before registration. Duplicate, missing, oversized and unsupported result blocks fail the batch before any pending call is answered; failures reject pending calls and interrupt the turn. A change to tool names, descriptions, or schemas is validated and applied with `thread/resume` between completed turns; tool results in flight use their original catalog. Server requests are bounded by the client timeout and cancellation. \[PATH: src/adapter.ts] \[PATH: src/app-server/client.ts]
 
 ## Development boundaries
 

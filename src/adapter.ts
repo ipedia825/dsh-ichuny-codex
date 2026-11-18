@@ -21,7 +21,7 @@ import { safeErrorMessage } from './app-server/redaction.js'
 import { toolCallId } from './dsh-compat.js'
 import { isJsonValue, parseDeltaNotification, parseExperimentalDynamicToolCall, parseTokenUsageNotification } from './app-server/validation.js'
 import type { AppServerRequest } from './app-server/types.js'
-import type { CodexModel, CodexTokenUsageBreakdown, CodexUserInput, ExperimentalDynamicToolSpec, ExperimentalDynamicToolResult, JsonObject, JsonValue } from './app-server/types.js'
+import type { CodexModel, CodexTokenUsageBreakdown, CodexUserInput, ExperimentalDynamicToolSpec, ExperimentalDynamicToolOutput, ExperimentalDynamicToolResult, JsonObject, JsonValue } from './app-server/types.js'
 
 export const CODEX_PROVIDER = 'my-codex'
 
@@ -29,25 +29,31 @@ type Notification = Parameters<Parameters<AppServerClient['onNotification']>[0]>
 
 type PendingToolCall = {
   readonly callId: string
+  readonly name: string
+  readonly argumentsText: string
   readonly resolve: (result: ExperimentalDynamicToolResult) => void
   readonly reject: (error: Error) => void
   responded: boolean
+  exposed: boolean
 }
 
 type ThreadState = {
-  readonly threadId: string
-  readonly toolNames: ReadonlySet<string>
+  threadId: string
+  toolNames: ReadonlySet<string>
+  catalogFingerprint: string
   readonly pendingCalls: Map<string, PendingToolCall>
   readonly queue: Notification[]
   wake: (() => void) | undefined
   unsubscribe: (() => void) | undefined
   turnId: string | undefined
+  lastUserMessageId: string | undefined
 }
 
 const MAX_DYNAMIC_TOOLS = 128
 const MAX_DYNAMIC_TOOL_ARGUMENT_BYTES = 262_144
 const MAX_DYNAMIC_TOOL_CALL_ID_BYTES = 256
 const MAX_DYNAMIC_TOOL_RESULT_BYTES = 4 * 1024 * 1024
+const MAX_DYNAMIC_TOOL_IMAGES = 8
 const DYNAMIC_TOOL_NAME = /^[A-Za-z0-9_-]+$/u
 
 function codexError(message: string, code: string): LlmError {
@@ -133,39 +139,64 @@ export class CodexAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.assertProvider(options.provider)
-    const input = await this.buildUserInput(options.messages, options.signal)
-    const hasPendingTools = options.sessionId !== undefined
-      && (this.threads.get(String(options.sessionId))?.pendingCalls.size ?? 0) > 0
-    if (input.length === 0 && !hasPendingTools) throw codexError('Codex request has no user content', 'EMPTY_INPUT')
+    const key = options.sessionId === undefined ? `ephemeral:${randomUUID()}` : String(options.sessionId)
+    let state = this.threads.get(key)
+    const replay = state === undefined && options.sessionId !== undefined ? replayCandidate(options.messages) : undefined
+    const pendingTools = (state?.pendingCalls.size ?? 0) > 0
+    const freshMessages = pendingTools ? [] : newUserMessages(options.messages, state?.lastUserMessageId ?? replay?.lastUserMessageId)
+    const input = pendingTools ? [] : await this.buildUserInput(freshMessages, options.signal)
+    if (input.length === 0 && !pendingTools) throw codexError('Codex request has no new user content', 'EMPTY_INPUT')
     await this.requireLogin(options.signal)
 
     if ((options.tools?.length ?? 0) > 0 && options.sessionId === undefined) {
       throw codexError('Dynamic tools require a persistent DSH session id', 'DYNAMIC_TOOLS_REQUIRE_SESSION')
     }
-    const key = options.sessionId === undefined ? `ephemeral:${randomUUID()}` : String(options.sessionId)
-    let state = this.threads.get(key)
     if (state === undefined) {
       const toolSpecs = buildToolSpecs(options.tools ?? [])
-      const thread = await this.client.startThread({
+      const baseInstructions = options.system ?? options.messages
+        .filter((message) => message.role === 'system')
+        .flatMap((message) => message.content)
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text).join('\n\n')
+      const threadOptions = {
         cwd: this.cwd,
         sandbox: this.sandbox,
         approvalPolicy: this.approvalPolicy,
+        ...(baseInstructions.length === 0 ? {} : { baseInstructions }),
         ...(toolSpecs.length === 0 ? {} : { dynamicTools: toolSpecs }),
-      }, { ...requestOptions(options.signal), timeoutMs: this.requestTimeoutMs })
+      }
+      const thread = replay === undefined
+        ? await this.client.startThread(threadOptions, { ...requestOptions(options.signal), timeoutMs: this.requestTimeoutMs })
+        : await this.client.resumeThread({ ...threadOptions, threadId: replay.threadId, dynamicTools: toolSpecs }, { ...requestOptions(options.signal), timeoutMs: this.requestTimeoutMs })
       state = {
         threadId: thread.id,
         toolNames: new Set(toolSpecs.map((tool) => tool.name)),
+        catalogFingerprint: toolCatalogFingerprint(toolSpecs),
         pendingCalls: new Map(),
         queue: [],
         wake: undefined,
         unsubscribe: undefined,
         turnId: undefined,
+        lastUserMessageId: replay?.lastUserMessageId,
       }
       this.threads.set(key, state)
-    } else if ((options.tools?.length ?? 0) > 0) {
-      const names = new Set((options.tools ?? []).map((tool) => tool.name))
-      if (names.size !== state.toolNames.size || [...names].some((name) => !state?.toolNames.has(name))) {
-        throw codexError('Dynamic tool catalog changed after the Codex thread started', 'DYNAMIC_TOOL_SCHEMA_DRIFT')
+    } else if (state.pendingCalls.size === 0) {
+      const toolSpecs = buildToolSpecs(options.tools ?? [])
+      const fingerprint = toolCatalogFingerprint(toolSpecs)
+      if (fingerprint !== state.catalogFingerprint) {
+        if (state.turnId !== undefined) {
+          throw codexError('Codex turn has not completed; cannot replace dynamic tools', 'SESSION_BUSY')
+        }
+        const resumed = await this.client.resumeThread({
+          threadId: state.threadId,
+          cwd: this.cwd,
+          sandbox: this.sandbox,
+          approvalPolicy: this.approvalPolicy,
+          dynamicTools: toolSpecs,
+        }, { ...requestOptions(options.signal), timeoutMs: this.requestTimeoutMs })
+        state.threadId = resumed.id
+        state.toolNames = new Set(toolSpecs.map((tool) => tool.name))
+        state.catalogFingerprint = fingerprint
       }
     }
 
@@ -185,7 +216,7 @@ export class CodexAdapter extends LlmAdapter {
     try {
       if (activeState.pendingCalls.size > 0) {
         try {
-          resolveToolResults(activeState.pendingCalls, options.messages)
+          await resolveToolResults(activeState.pendingCalls, options.messages, this.attachments?.(), options.signal)
         } catch (error) {
           const failure = error instanceof Error ? error : codexError(safeErrorMessage(error), 'DYNAMIC_TOOL_RESULT_INVALID')
           for (const pending of [...activeState.pendingCalls.values()]) {
@@ -208,6 +239,8 @@ export class CodexAdapter extends LlmAdapter {
         )
         turnId = turn.id
         activeState.turnId = turnId
+        const lastUser = freshMessages.at(-1)
+        if (lastUser?.role === 'user' && lastUser.id !== undefined) activeState.lastUserMessageId = String(lastUser.id)
       }
       options.signal?.addEventListener('abort', abort, { once: true })
       let index = 0
@@ -216,15 +249,16 @@ export class CodexAdapter extends LlmAdapter {
       while (true) {
         const notification = await nextNotification(queue, notify)
         if (notification.method === 'dsh/dynamic-tool-call') {
-          const callId = typeof notification.params?.['callId'] === 'string' ? notification.params['callId'] : ''
-          const pending = activeState.pendingCalls.get(callId)
-          if (pending === undefined) continue
-          const index = blocks.size
-          const id = toolCallId(callId)
-          const args = typeof notification.params?.['arguments'] === 'string' ? notification.params['arguments'] : '{}'
-          yield { type: 'block-start', index, blockType: 'tool-call' }
-          yield { type: 'tool-call-delta', index, id, ...(typeof notification.params?.['tool'] === 'string' ? { name: notification.params['tool'] } : {}), argumentsDelta: args }
-          yield { type: 'block-end', index, block: { type: 'tool-call', id, name: typeof notification.params?.['tool'] === 'string' ? notification.params['tool'] : 'unknown', arguments: args } }
+          const calls = [...activeState.pendingCalls.values()].filter((call) => !call.exposed && !call.responded)
+          if (calls.length === 0) continue
+          for (const call of calls) call.exposed = true
+          for (const [offset, call] of calls.entries()) {
+            const index = blocks.size + offset
+            const id = toolCallId(call.callId)
+            yield { type: 'block-start', index, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.argumentsText }
+            yield { type: 'block-end', index, block: { type: 'tool-call', id, name: call.name, arguments: call.argumentsText } }
+          }
           yield { type: 'finish', reason: { kind: 'tool-calls' } }
           return
         }
@@ -255,7 +289,14 @@ export class CodexAdapter extends LlmAdapter {
         activeState.turnId = undefined
         if (usage !== undefined) yield usageChunk(usage)
         if (completed.params.turn.status === 'completed') {
-          yield { type: 'finish', reason: { kind: 'stop' } }
+          yield {
+            type: 'finish',
+            reason: { kind: 'stop' },
+            ...(options.sessionId === undefined ? {} : { replayState: { response: {
+              version: 1, threadId: activeState.threadId,
+              lastUserMessageId: activeState.lastUserMessageId ?? null,
+            } } }),
+          }
         } else {
           yield { type: 'finish', reason: { kind: completed.params.turn.status === 'interrupted' ? 'aborted' : 'error', failure: { code: 'CODEX_TURN_FAILED', message: safeErrorMessage(completed.params.turn.error?.message ?? 'Codex turn failed') } } }
         }
@@ -281,7 +322,7 @@ export class CodexAdapter extends LlmAdapter {
     const input: CodexUserInput[] = []
     const store = this.attachments?.()
     for (const message of messages) {
-      if (message.role === 'tool') continue
+      if (message.role !== 'user') continue
       for (const block of message.content) {
         if (block.type === 'text') {
           if (block.text.length > 0) input.push({ type: 'text', text: block.text })
@@ -326,7 +367,7 @@ export class CodexAdapter extends LlmAdapter {
     if (Buffer.byteLength(call.callId, 'utf8') > MAX_DYNAMIC_TOOL_CALL_ID_BYTES) return Promise.reject(codexError('Dynamic tool call id is too large', 'DYNAMIC_TOOL_CALL_ID_TOO_LARGE'))
     if (state.pendingCalls.has(call.callId)) return Promise.reject(codexError('Duplicate dynamic tool call id', 'DYNAMIC_TOOL_DUPLICATE'))
     if (signal.aborted) return Promise.reject(new LlmError('Dynamic tool call was aborted', 'ABORTED'))
-    if (state.pendingCalls.size >= 16) return Promise.reject(codexError('Dynamic tool pending-call limit exceeded', 'DYNAMIC_TOOL_PENDING_LIMIT'))
+    if ([...state.pendingCalls.values()].filter((pending) => !pending.responded).length >= 16) return Promise.reject(codexError('Dynamic tool pending-call limit exceeded', 'DYNAMIC_TOOL_PENDING_LIMIT'))
     const argumentText = JSON.stringify(call.arguments)
     if (Buffer.byteLength(argumentText, 'utf8') > MAX_DYNAMIC_TOOL_ARGUMENT_BYTES) return Promise.reject(codexError('Dynamic tool arguments are too large', 'DYNAMIC_TOOL_ARGUMENTS_TOO_LARGE'))
     return new Promise<JsonValue>((resolve, reject) => {
@@ -337,9 +378,12 @@ export class CodexAdapter extends LlmAdapter {
       signal.addEventListener('abort', onAbort, { once: true })
       state.pendingCalls.set(call.callId, {
         callId: call.callId,
+        name: call.tool,
+        argumentsText: argumentText,
         resolve: (result) => { if (state.pendingCalls.get(call.callId)?.responded === true) return; signal.removeEventListener('abort', onAbort); const pending = state.pendingCalls.get(call.callId); if (pending !== undefined) pending.responded = true; resolve(dynamicResultJson(result)) },
         reject: (error) => { signal.removeEventListener('abort', onAbort); state.pendingCalls.delete(call.callId); reject(error) },
         responded: false,
+        exposed: false,
       })
       state.queue.push({ method: 'dsh/dynamic-tool-call', params: { callId: call.callId, tool: call.tool, arguments: argumentText } })
       state.wake?.()
@@ -373,32 +417,71 @@ export class CodexAdapter extends LlmAdapter {
 
 function buildToolSpecs(tools: readonly ToolSchema[]): readonly ExperimentalDynamicToolSpec[] {
   if (tools.length > MAX_DYNAMIC_TOOLS) throw codexError(`Dynamic tool catalog exceeds ${MAX_DYNAMIC_TOOLS} tools`, 'DYNAMIC_TOOL_CATALOG_LIMIT')
+  const names = new Set<string>()
   return tools.map((tool) => {
     if (!DYNAMIC_TOOL_NAME.test(tool.name)) throw codexError(`Invalid dynamic tool name: ${tool.name}`, 'DYNAMIC_TOOL_NAME_INVALID')
+    if (names.has(tool.name)) throw codexError(`Duplicate dynamic tool name: ${tool.name}`, 'DYNAMIC_TOOL_DUPLICATE_NAME')
+    names.add(tool.name)
     if (!isJsonValue(tool.parameters) || Array.isArray(tool.parameters)) throw codexError(`Invalid schema for dynamic tool: ${tool.name}`, 'DYNAMIC_TOOL_SCHEMA_INVALID')
-    return { type: 'function', name: tool.name, description: tool.description, inputSchema: tool.parameters as JsonObject }
+    return { type: 'function', name: tool.name, description: tool.description, inputSchema: tool.parameters as JsonObject, ...(tool.deferLoading === true ? { deferLoading: true } : {}) }
   })
 }
 
-function resolveToolResults(pending: Map<string, PendingToolCall>, messages: readonly RequestMessage[]): void {
+function toolCatalogFingerprint(specs: readonly ExperimentalDynamicToolSpec[]): string {
+  return JSON.stringify([...specs].sort((left, right) => left.name.localeCompare(right.name)).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    deferLoading: tool.deferLoading === true,
+    schema: sortedJson(tool.inputSchema),
+  })))
+}
+
+function sortedJson(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) return value.map(sortedJson)
+  if (value === null || typeof value !== 'object') return value
+  const sorted: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>
+  for (const key of Object.keys(value).sort()) {
+    const child = value[key]
+    if (child !== undefined) sorted[key] = sortedJson(child)
+  }
+  return sorted
+}
+
+async function resolveToolResults(
+  pending: Map<string, PendingToolCall>,
+  messages: readonly RequestMessage[],
+  store: AttachmentStore | undefined,
+  signal: AbortSignal | undefined,
+): Promise<void> {
   const batch = new Map<string, { readonly call: PendingToolCall; readonly result: ExperimentalDynamicToolResult }>()
   let totalBytes = 0
+  let imageCount = 0
   for (const message of messages) {
     if (message.role !== 'tool') continue
     const call = pending.get(message.toolCallId)
-    if (call === undefined || call.responded) continue
+    if (call === undefined || call.responded || !call.exposed) continue
     if (batch.has(call.callId)) throw codexError(`Duplicate dynamic tool result: ${call.callId}`, 'DYNAMIC_TOOL_RESULT_DUPLICATE')
-    let text = ''
+    const contentItems: ExperimentalDynamicToolOutput[] = []
     for (const block of message.content) {
-      if (block.type !== 'text') throw codexError('Dynamic tool results must contain only text blocks', 'DYNAMIC_TOOL_RESULT_UNSUPPORTED')
-      totalBytes += Buffer.byteLength(block.text, 'utf8')
+      if (block.type === 'text') {
+        totalBytes += Buffer.byteLength(block.text, 'utf8')
+        contentItems.push({ type: 'inputText', text: block.text })
+      } else if (block.type === 'image') {
+        if (store === undefined) throw codexError('Dynamic tool image result requires a DSH attachment store', 'DYNAMIC_TOOL_IMAGE_UNAVAILABLE')
+        if (++imageCount > MAX_DYNAMIC_TOOL_IMAGES) throw codexError('Dynamic tool image count exceeded', 'DYNAMIC_TOOL_RESULT_TOO_LARGE')
+        const imageUrl = await imageDataUrl(store, block.attachment, signal)
+        totalBytes += Buffer.byteLength(imageUrl, 'utf8')
+        contentItems.push({ type: 'inputImage', imageUrl })
+      } else {
+        throw codexError(`Dynamic tool result block "${block.type}" is unsupported`, 'DYNAMIC_TOOL_RESULT_UNSUPPORTED')
+      }
       if (totalBytes > MAX_DYNAMIC_TOOL_RESULT_BYTES) throw codexError('Dynamic tool result batch is too large', 'DYNAMIC_TOOL_RESULT_TOO_LARGE')
-      text += block.text
     }
-    batch.set(call.callId, { call, result: { contentItems: [{ type: 'inputText', text }], success: message.isError !== true } })
+    batch.set(call.callId, { call, result: { contentItems, success: message.isError !== true } })
   }
-  if ([...pending.values()].some((call) => !call.responded && !batch.has(call.callId))) {
-    throw codexError(`Missing dynamic tool results for ${pending.size} call(s)`, 'DYNAMIC_TOOL_RESULT_MISSING')
+  const missing = [...pending.values()].filter((call) => call.exposed && !call.responded && !batch.has(call.callId))
+  if (missing.length > 0) {
+    throw codexError(`Missing dynamic tool results for ${missing.length} exposed call(s)`, 'DYNAMIC_TOOL_RESULT_MISSING')
   }
   for (const { call, result } of batch.values()) call.resolve(result)
 }
@@ -414,6 +497,37 @@ function dynamicResultJson(result: ExperimentalDynamicToolResult): JsonObject {
   }
 }
 
+
+function replayCandidate(messages: readonly RequestMessage[]): { readonly threadId: string; readonly lastUserMessageId?: string } | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role !== 'assistant' || message.source.provider !== CODEX_PROVIDER) continue
+    const envelope = message.source.replayState
+    if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) return undefined
+    const response = 'response' in envelope ? envelope.response : undefined
+    if (response === null || typeof response !== 'object' || Array.isArray(response)) return undefined
+    if (!('version' in response) || response.version !== 1 || !('threadId' in response) || typeof response.threadId !== 'string' || response.threadId.length === 0) return undefined
+    const cursor = 'lastUserMessageId' in response ? response.lastUserMessageId : undefined
+    if (cursor !== undefined && cursor !== null && (typeof cursor !== 'string' || cursor.length === 0)) return undefined
+    return { threadId: response.threadId, ...(typeof cursor === 'string' ? { lastUserMessageId: cursor } : {}) }
+  }
+  return undefined
+}
+
+function newUserMessages(messages: readonly RequestMessage[], cursor: string | undefined): RequestMessage[] {
+  let from = 0
+  if (cursor !== undefined) {
+    const index = messages.findIndex((message) => message.role === 'user' && message.id === cursor)
+    if (index >= 0) {
+      from = index + 1
+    } else {
+      const lastAnswered = messages.findLastIndex((message) => message.role === 'assistant' && message.source.provider === CODEX_PROVIDER)
+      if (lastAnswered < 0) throw codexError('Codex input cursor is missing after history compaction', 'SESSION_CURSOR_MISSING')
+      from = lastAnswered + 1
+    }
+  }
+  return messages.slice(from).filter((message) => message.role === 'user')
+}
 
 function requestOptions(signal: AbortSignal | undefined): { readonly signal?: AbortSignal } {
   return signal === undefined ? {} : { signal }

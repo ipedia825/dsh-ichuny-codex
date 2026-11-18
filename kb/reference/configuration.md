@@ -2,7 +2,7 @@
 title: "dsh-ichuny-codex Configuration Reference"
 category: reference
 service: dsh-ichuny-codex
-version: "1.7.7"
+version: "1.7.14"
 tags: [configuration, dsh, codex, models, authentication]
 created: "2026-08-26"
 last_updated: "2026-11-16"
@@ -33,7 +33,7 @@ An existing Codex CLI `chatgpt` login is required for model discovery, generatio
 
 The DSH `llm` service is required. An attachment store is optional for text requests but required for image and file blocks. A web server is optional for the quota route; the bundled Web client requires that route to show quota. The adapter uses `experimentalApi: true` on every app-server connection. When a request contains DSH tools, a persistent `sessionId` is required; there is no `experimentalDynamicTools` configuration flag. [PATH: src/index.ts] [PATH: src/adapter.ts] [PATH: client.js]
 
-The current plugin does not expose `provider`, `allowApiKeyAuth`, `inheritSessionPermissions`, `dynamicToolTimeoutMs` or `turnTimeoutMs` configuration fields. The separate `resolveSessionPermissions` helper is not wired into `apply()`. Threads are cached only in process memory; after a plugin restart the adapter starts a new thread rather than resuming a serialized one. [PATH: src/index.ts] [PATH: src/adapter.ts] [PATH: src/session-permissions.ts]
+The current plugin does not expose `provider`, `allowApiKeyAuth`, `inheritSessionPermissions`, `dynamicToolTimeoutMs` or `turnTimeoutMs` configuration fields. The separate `resolveSessionPermissions` helper is not wired into `apply()`. In-process threads keep a DSH user-message cursor; successful replies also persist the non-secret Codex thread ID and cursor in DSH replay metadata. A new adapter can resume a thread from that metadata, but older replies have no replay state and pending tool calls cannot survive restart. [PATH: src/index.ts] [PATH: src/adapter.ts] [PATH: src/session-permissions.ts]
 
 ## Child environment
 

@@ -54,10 +54,10 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   return chunks
 }
 
-function toolResult(text: string, id = 'result-1'): Message {
+function toolResult(text: string, id = 'result-1', callId = 'call-1'): Message {
   return {
-    id: MessageId(id), role: 'tool', toolCallId: toolCallId('call-1'),
-    source: { kind: 'tool', callId: toolCallId('call-1') },
+    id: MessageId(id), role: 'tool', toolCallId: toolCallId(callId),
+    source: { kind: 'tool', callId: toolCallId(callId) },
     content: [{ type: 'text', text }],
   }
 }
@@ -130,6 +130,21 @@ describe('current DSH dynamic tools', () => {
     }
   })
 
+  it('keeps the pending turn intact when DSH updates its catalog mid-call', async () => {
+    const fake = fakeClient()
+    const adapter = new CodexAdapter({ client: fake.client, cwd: '/workspace', sandbox: 'workspace-write', approvalPolicy: 'untrusted', requestTimeoutMs: 1_000 })
+    try {
+      const { response } = await beginToolCall(fake, adapter)
+      const continuation = collect(adapter.stream(options([toolResult('found')], [])))
+      await expect(response).resolves.toMatchObject({ contentItems: [{ type: 'inputText', text: 'found' }] })
+      fake.emit({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', items: [], status: 'completed', error: null } } })
+      await expect(continuation).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } })]))
+      expect(fake.methods.startTurn).toHaveBeenCalledOnce()
+    } finally {
+      await adapter.close()
+    }
+  })
+
   it('rejects duplicate results atomically and interrupts the pending turn', async () => {
     const fake = fakeClient()
     const adapter = new CodexAdapter({ client: fake.client, cwd: '/workspace', sandbox: 'workspace-write', approvalPolicy: 'untrusted', requestTimeoutMs: 1_000 })
@@ -172,13 +187,59 @@ describe('current DSH dynamic tools', () => {
     }
   })
 
-  it('rejects every pending call when one result is missing', async () => {
+  it('emits all four concurrent Codex calls before requiring their results', async () => {
+    const fake = fakeClient()
+    const adapter = new CodexAdapter({ client: fake.client, cwd: '/workspace', sandbox: 'workspace-write', approvalPolicy: 'untrusted', requestTimeoutMs: 1_000 })
+    try {
+      const stream = collect(adapter.stream(options([USER])))
+      await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+      const ids = ['call-1', 'call-2', 'call-3', 'call-4']
+      const responses = ids.map((id) => fake.requestTool(TOOL.name, id))
+      expect((await stream).filter((chunk) => chunk.type === 'tool-call-delta').map((chunk) => chunk.id))
+        .toEqual(ids.map(toolCallId))
+      const results = ids.map((id, index) => toolResult(`value-${index}`, `result-${index}`, id))
+      const continuation = collect(adapter.stream(options(results)))
+      await expect(Promise.all(responses)).resolves.toHaveLength(4)
+      fake.emit({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', items: [], status: 'completed', error: null } } })
+      expect(await continuation).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } })]))
+      expect(fake.methods.interruptTurn).not.toHaveBeenCalled()
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('exposes a late Codex call after responding to the first one', async () => {
     const fake = fakeClient()
     const adapter = new CodexAdapter({ client: fake.client, cwd: '/workspace', sandbox: 'workspace-write', approvalPolicy: 'untrusted', requestTimeoutMs: 1_000 })
     try {
       const { response: first } = await beginToolCall(fake, adapter)
       const second = fake.requestTool(TOOL.name, 'call-2')
+      const continuation = collect(adapter.stream(options([toolResult('first')])))
+      await expect(first).resolves.toMatchObject({ success: true })
+      expect((await continuation).filter((chunk) => chunk.type === 'tool-call-delta').map((chunk) => chunk.id))
+        .toEqual([toolCallId('call-2')])
+      const finalStep = collect(adapter.stream(options([toolResult('second', 'result-2', 'call-2')])))
+      await expect(second).resolves.toMatchObject({ success: true })
+      fake.emit({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', items: [], status: 'completed', error: null } } })
+      await expect(finalStep).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } })]))
+      expect(fake.methods.startTurn).toHaveBeenCalledOnce()
+    } finally {
+      await adapter.close()
+    }
+  })
+
+
+  it('rejects an incomplete batch when both calls were exposed to DSH', async () => {
+    const fake = fakeClient()
+    const adapter = new CodexAdapter({ client: fake.client, cwd: '/workspace', sandbox: 'workspace-write', approvalPolicy: 'untrusted', requestTimeoutMs: 1_000 })
+    try {
+      const stream = collect(adapter.stream(options([USER])))
+      await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledOnce())
+      const first = fake.requestTool(TOOL.name)
+      const second = fake.requestTool(TOOL.name, 'call-2')
+      void first.catch(() => undefined)
       void second.catch(() => undefined)
+      expect((await stream).filter((chunk) => chunk.type === 'tool-call-delta')).toHaveLength(2)
       await expect(collect(adapter.stream(options([toolResult('found')]))))
         .rejects.toMatchObject({ failure: { code: 'DYNAMIC_TOOL_RESULT_MISSING' } })
       await expect(first).rejects.toMatchObject({ failure: { code: 'DYNAMIC_TOOL_RESULT_MISSING' } })
@@ -189,16 +250,57 @@ describe('current DSH dynamic tools', () => {
     }
   })
 
-  it('rejects non-text tool results instead of silently discarding them', async () => {
+  it('forwards a mixed text and image tool result without dropping either block', async () => {
+    const fake = fakeClient()
+    const bytes = Uint8Array.from([0, 1, 2, 3])
+    const store = { readImageRequest: vi.fn(async () => ({ data: bytes, mediaType: 'image/webp' as const })) }
+    const adapter = new CodexAdapter({ client: fake.client, cwd: '/workspace', sandbox: 'workspace-write', approvalPolicy: 'untrusted', requestTimeoutMs: 1_000, attachments: () => store as never })
+    try {
+      const { response } = await beginToolCall(fake, adapter)
+      const result = { ...toolResult(''), content: [
+        { type: 'text', text: 'screenshot' },
+        { type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/webp', bytes: 4, width: 1, height: 1 } },
+      ] } as unknown as Message
+      const continuation = collect(adapter.stream(options([result])))
+      await expect(response).resolves.toEqual({
+        contentItems: [
+          { type: 'inputText', text: 'screenshot' },
+          { type: 'inputImage', imageUrl: 'data:image/webp;base64,AAECAw==' },
+        ],
+        success: true,
+      })
+      expect(store.readImageRequest).toHaveBeenCalledOnce()
+      fake.emit({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', items: [], status: 'completed', error: null } } })
+      await expect(continuation).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } })]))
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('rejects images without an attachment store before answering any calls', async () => {
     const fake = fakeClient()
     const adapter = new CodexAdapter({ client: fake.client, cwd: '/workspace', sandbox: 'workspace-write', approvalPolicy: 'untrusted', requestTimeoutMs: 1_000 })
     try {
       const { response } = await beginToolCall(fake, adapter)
-      const imageResult = {
+      const result = { ...toolResult(''), content: [{ type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/webp', bytes: 4, width: 1, height: 1 } }] } as unknown as Message
+      await expect(collect(adapter.stream(options([result])))).rejects.toMatchObject({ failure: { code: 'DYNAMIC_TOOL_IMAGE_UNAVAILABLE' } })
+      await expect(response).rejects.toMatchObject({ failure: { code: 'DYNAMIC_TOOL_IMAGE_UNAVAILABLE' } })
+      expect(fake.methods.interruptTurn).toHaveBeenCalledOnce()
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('rejects unsupported tool result blocks instead of silently discarding them', async () => {
+    const fake = fakeClient()
+    const adapter = new CodexAdapter({ client: fake.client, cwd: '/workspace', sandbox: 'workspace-write', approvalPolicy: 'untrusted', requestTimeoutMs: 1_000 })
+    try {
+      const { response } = await beginToolCall(fake, adapter)
+      const unsupportedResult = {
         ...toolResult(''),
-        content: [{ type: 'image', attachment: { attachmentId: 'image-1', mediaType: 'image/png', bytes: 4, width: 1, height: 1 } }],
+        content: [{ type: 'reasoning', text: 'internal reasoning' }],
       } as unknown as Message
-      await expect(collect(adapter.stream(options([imageResult]))))
+      await expect(collect(adapter.stream(options([unsupportedResult]))))
         .rejects.toMatchObject({ failure: { code: 'DYNAMIC_TOOL_RESULT_UNSUPPORTED' } })
       await expect(response).rejects.toMatchObject({ failure: { code: 'DYNAMIC_TOOL_RESULT_UNSUPPORTED' } })
     } finally {

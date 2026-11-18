@@ -25,7 +25,8 @@ function createFakeClient() {
     readAccount: vi.fn(async () => ({ authenticated: true, kind: 'chatgpt' as const, requiresOpenaiAuth: true })),
     listModels: vi.fn(async () => [MODEL] as readonly CodexModel[]),
     startThread: vi.fn(async () => ({ id: 'thread-1' })),
-    startTurn: vi.fn(async () => {
+    resumeThread: vi.fn(async (request: { readonly threadId: string }) => ({ id: request.threadId })),
+    startTurn: vi.fn(async (_request: { readonly input: readonly { readonly type: string; readonly text?: string }[] }) => {
       const id = `turn-${++nextTurn}`
       queueMicrotask(() => {
         for (const listener of listeners) {
@@ -53,13 +54,20 @@ function createFakeClient() {
   return { adapter, methods }
 }
 
-function options(sessionId?: string): GenerateOptions {
+function options(sessionId?: string, messageId = 'message-1'): GenerateOptions {
   return {
     provider: CODEX_PROVIDER,
     model: MODEL.model,
-    messages: [{ id: MessageId('message-1'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] }],
+    messages: [{ id: MessageId(messageId), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] }],
     ...(sessionId === undefined ? {} : { sessionId: sessionId as NonNullable<GenerateOptions['sessionId']> }),
   }
+}
+
+function historyOptions(sessionId: string, count: number): GenerateOptions {
+  return { ...options(sessionId), messages: Array.from({ length: count }, (_, index) => ({
+    id: MessageId(`message-${index + 1}`), role: 'user' as const, source: { kind: 'user' as const },
+    content: [{ type: 'text' as const, text: `question-${index + 1}` }],
+  })) }
 }
 
 async function collect(chunks: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> {
@@ -97,7 +105,13 @@ describe('current Codex adapter', () => {
     const { adapter, methods } = createFakeClient()
     try {
       const first = await collect(adapter.stream(options('session-1')))
-      const second = await collect(adapter.stream(options('session-1')))
+      const secondInput = { ...options('session-1', 'message-2'), messages: [
+        ...options('session-1').messages,
+        { id: MessageId('assistant-1'), role: 'assistant' as const, source: { kind: 'model' as const, provider: CODEX_PROVIDER, model: MODEL.model }, content: [{ type: 'text' as const, text: 'old assistant reply' }] },
+        { id: MessageId('message-2'), role: 'user' as const, source: { kind: 'user' as const }, content: [{ type: 'text' as const, text: 'new question' }] },
+      ] }
+      const second = await collect(adapter.stream(secondInput))
+      expect(methods.startTurn.mock.calls[1]?.[0]).toMatchObject({ input: [{ type: 'text', text: 'new question' }] })
       expect(first).toEqual(expect.arrayContaining([
         expect.objectContaining({ type: 'reasoning-delta', text: 'think' }),
         expect.objectContaining({ type: 'text-delta', text: 'answer' }),
@@ -110,6 +124,124 @@ describe('current Codex adapter', () => {
       await adapter.close()
     }
     expect(methods.close).toHaveBeenCalledOnce()
+  })
+
+  it('sends the system prompt as thread instructions, never as user text', async () => {
+    const { adapter, methods } = createFakeClient()
+    try {
+      const messages = [
+        { id: MessageId('system-1'), role: 'system' as const, source: { kind: 'system-prompt' as const }, content: [{ type: 'text' as const, text: 'system rules' }] },
+        ...options('session-system').messages,
+      ]
+      await collect(adapter.stream({ ...options('session-system'), messages }))
+      expect(methods.startThread).toHaveBeenCalledWith(expect.objectContaining({ baseInstructions: 'system rules' }), expect.any(Object))
+      expect(methods.startTurn.mock.calls[0]?.[0].input).toEqual([{ type: 'text', text: 'hello' }])
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('resumes the persisted Codex thread after adapter recreation', async () => {
+    const original = createFakeClient()
+    const first = await collect(original.adapter.stream(options('session-restored')))
+    await original.adapter.close()
+    const finish = first.find((chunk) => chunk.type === 'finish')
+    expect(finish).toMatchObject({ type: 'finish', replayState: { response: { threadId: 'thread-1', lastUserMessageId: 'message-1' } } })
+    const restored = createFakeClient()
+    try {
+      const assistant = { id: MessageId('assistant-1'), role: 'assistant' as const,
+        source: { kind: 'model' as const, provider: CODEX_PROVIDER, model: MODEL.model, replayState: finish?.type === 'finish' ? finish.replayState : undefined },
+        content: [{ type: 'text' as const, text: 'prior answer' }] }
+      await collect(restored.adapter.stream({ ...options('session-restored'), messages: [
+        ...options('session-restored').messages,
+        assistant,
+        { id: MessageId('message-2'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'new question' }] },
+      ] }))
+      expect(restored.methods.startThread).not.toHaveBeenCalled()
+      expect(restored.methods.resumeThread).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1' }), expect.any(Object))
+      expect(restored.methods.startTurn.mock.calls[0]?.[0].input).toEqual([{ type: 'text', text: 'new question' }])
+    } finally {
+      await restored.adapter.close()
+    }
+  })
+
+  it('does not replay a completed request without new user content', async () => {
+    const { adapter, methods } = createFakeClient()
+    try {
+      await collect(adapter.stream(options('session-repeat')))
+      await expect(collect(adapter.stream(options('session-repeat')))).rejects.toMatchObject({ failure: { code: 'EMPTY_INPUT' } })
+      expect(methods.startTurn).toHaveBeenCalledOnce()
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('resumes after compaction only past the most recent own assistant boundary', async () => {
+    const { adapter, methods } = createFakeClient()
+    try {
+      await collect(adapter.stream(options('session-compact')))
+      const assistant = { id: MessageId('assistant-1'), role: 'assistant' as const,
+        source: { kind: 'model' as const, provider: CODEX_PROVIDER, model: MODEL.model },
+        content: [{ type: 'text' as const, text: 'already answered' }] }
+      await collect(adapter.stream({ ...options('session-compact'), messages: [
+        { id: MessageId('old-after-compaction'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'old' }] },
+        assistant,
+        { id: MessageId('new-after-compaction'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'fresh' }] },
+      ] }))
+      expect(methods.startTurn.mock.calls[1]?.[0].input).toEqual([{ type: 'text', text: 'fresh' }])
+      expect(methods.startThread).toHaveBeenCalledOnce()
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('fails closed if compaction loses the cursor without a model boundary', async () => {
+    const { adapter, methods } = createFakeClient()
+    try {
+      await collect(adapter.stream(options('session-cursor')))
+      await expect(collect(adapter.stream({ ...options('session-cursor'), messages: [
+        { id: MessageId('replaced'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'unknown history' }] },
+      ] }))).rejects.toMatchObject({ failure: { code: 'SESSION_CURSOR_MISSING' } })
+      expect(methods.startTurn).toHaveBeenCalledOnce()
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('refreshes a completed Codex thread when DSH tools become available', async () => {
+    const { adapter, methods } = createFakeClient()
+    const lookup = { name: 'lookup', description: 'Lookup', parameters: { type: 'object', properties: { key: { type: 'string' } } } }
+    try {
+      await collect(adapter.stream(historyOptions('session-tools', 1)))
+      await collect(adapter.stream({ ...historyOptions('session-tools', 2), tools: [lookup] }))
+      await collect(adapter.stream({ ...historyOptions('session-tools', 3), tools: [lookup] }))
+      expect(methods.startThread).toHaveBeenCalledOnce()
+      expect(methods.resumeThread).toHaveBeenCalledOnce()
+      expect(methods.resumeThread).toHaveBeenCalledWith(expect.objectContaining({
+        threadId: 'thread-1',
+        dynamicTools: [expect.objectContaining({ name: 'lookup' })],
+      }), expect.any(Object))
+      expect(methods.startTurn).toHaveBeenCalledTimes(3)
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('updates changed schemas and removal but ignores only key-order differences', async () => {
+    const { adapter, methods } = createFakeClient()
+    const original = { name: 'lookup', description: 'Lookup', parameters: { type: 'object', properties: { key: { type: 'string' } } } }
+    try {
+      await collect(adapter.stream({ ...historyOptions('session-schema', 1), tools: [original] }))
+      await collect(adapter.stream({ ...historyOptions('session-schema', 2), tools: [{ ...original, parameters: { properties: { key: { type: 'string' } }, type: 'object' } }] }))
+      expect(methods.resumeThread).not.toHaveBeenCalled()
+      await collect(adapter.stream({ ...historyOptions('session-schema', 3), tools: [{ ...original, description: 'Changed' }] }))
+      await collect(adapter.stream({ ...historyOptions('session-schema', 4), tools: [{ ...original, description: 'Changed', deferLoading: true }] }))
+      await collect(adapter.stream({ ...historyOptions('session-schema', 5), tools: [] }))
+      expect(methods.resumeThread).toHaveBeenCalledTimes(3)
+      expect(methods.resumeThread).toHaveBeenLastCalledWith(expect.objectContaining({ dynamicTools: [] }), expect.any(Object))
+    } finally {
+      await adapter.close()
+    }
   })
 
   it('refuses tool catalogs without a persistent session', async () => {

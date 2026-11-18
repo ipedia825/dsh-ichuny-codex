@@ -2,7 +2,7 @@
 title: "dsh-ichuny-codex Common Issues"
 category: troubleshooting
 service: dsh-ichuny-codex
-version: "1.7.7"
+version: "1.7.14"
 tags: [troubleshooting, codex, authentication, dsh, tools, attachments]
 created: "2026-08-26"
 last_updated: "2026-11-16"
@@ -33,7 +33,7 @@ Text requests can run without `attachments`. Image and file blocks require the o
 
 ## Dynamic tool calls stop
 
-Tools require a persistent DSH `sessionId`. A catalog above 128 entries, more than 16 pending calls, an invalid name or arguments above 256 KiB are rejected. The current adapter forwards text tool-result blocks, not image/audio results. A changed set of tool names on an existing thread fails; do not assume complete schema fingerprinting. After a plugin restart, in-memory thread state and pending calls are gone; start a fresh session when continuity is required. [PATH: src/adapter.ts]
+Tools require a persistent DSH `sessionId`. A catalog above 128 entries, more than 16 pending calls, duplicate or invalid names, or arguments above 256 KiB are rejected. The adapter forwards text and stored image tool-result blocks. A DSH image without an available attachment store fails with `DYNAMIC_TOOL_IMAGE_UNAVAILABLE`; unsupported audio or other blocks are still rejected. If the next completed turn has different tools, the adapter validates the entire catalog and uses Codex `thread/resume` to refresh it, including an initially empty catalog. Only tool calls actually emitted in a DSH step require results in the next continuation. Codex calls arriving afterward are exposed in the following step; a missing result for an exposed call remains fatal. If `DYNAMIC_TOOL_RESULT_MISSING` persists, inspect the archived assistant tool-call IDs and corresponding tool/result IDs before changing a session. If `thread/resume` itself fails, check the app-server error and pinned Codex CLI version. After a plugin restart, successful replies from this version may restore their Codex thread via adapter replay metadata; older replies without metadata start a fresh thread. `SESSION_CURSOR_MISSING` means compaction removed the last sent user message and no safe matching assistant boundary remains: do not resend the whole retained history blindly. [PATH: src/adapter.ts] [PATH: src/app-server/client.ts]
 
 ## Quota display is absent
 
