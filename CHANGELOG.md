@@ -4,7 +4,11 @@ All notable changes from 2026-11-14 onward are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.7.14] - 2026-11-18
+## [1.7.14] - 2026-11-19
+
+### Security
+
+- Updated the development-only ESLint dependency to 10.15.0. The full dependency audit still reports moderate-severity findings in the upstream development-tool chain; production-only dependency audit reports no findings. No runtime or DSH peer dependency changed.
 
 ### Fixed
 

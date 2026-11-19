@@ -2,10 +2,10 @@
 title: "SOP: Release Readiness"
 category: procedures
 service: dsh-ichuny-codex
-version: "1.7.10"
+version: "1.7.14"
 tags: [sop, release, npm, provenance, packaging]
 created: "2026-08-26"
-last_updated: "2026-11-16"
+last_updated: "2026-11-19"
 description: "Lists current local release blockers and the checks required before enabling publication."
 ---
 
@@ -13,7 +13,7 @@ description: "Lists current local release blockers and the checks required befor
 
 ## Current status
 
-This copy is not ready for `npm run release`. A candidate `.github/workflows/publish.yml` exists locally but has not been committed or pushed. This Windows host lacks Bash, Docker and the GitHub CLI required by `scripts/release.sh`; its npm version also differs from the pinned release-script requirement. The configured suite runs all remaining spec files and its coverage gate passes. The rc.3 development graph passes the high-severity audit, while the supported rc.1 host still pins a Zod version with a high-severity advisory. The user reports a successful installed rc.1 DSH conversation; the rc.3 host has no real-client smoke result, and a bundled app-server smoke in this agent environment could not open its local state database. The changelog contains only Unreleased notes. Do not tag, push a release tag or publish until the rc.3 smoke, publisher credentials/trusted-publishing setup and all release gates are confirmed. [PATH: scripts/release.sh] [PATH: .github/workflows/publish.yml] [PATH: vitest.config.ts] [PATH: package.json] [PATH: CHANGELOG.md]
+The GitHub publish workflow reruns all release gates before npm publishing. On 2026-11-19, a clean install, version and KB checks, typecheck, lint, all 130 configured tests and coverage thresholds, build, source and permission audits, the high-severity dependency audit, signature verification, and package dry-run passed locally. The full dependency audit still reports moderate findings in development tools, while production dependencies report none; these do not cross the workflow's high-severity threshold. A real rc.3 Web conversation was confirmed for the installed 1.7.14 candidate. Do not claim a public release until the tagged GitHub workflow and registry publication both succeed. [PATH: .github/workflows/publish.yml] [PATH: package.json] [PATH: CHANGELOG.md]
 
 ## Prepare a candidate
 
