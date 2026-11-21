@@ -263,12 +263,12 @@ describe('package composition metadata', () => {
     expect(packageJson.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(packageJson.peerDependencies).toMatchObject({
       '@deepseek-ai/cordis': '~4.1.0',
-      '@deepseek-ai/dsh-attachment': '0.2.2-rc.1 || 0.2.2-rc.3',
-      '@deepseek-ai/dsh-llm': '0.2.2-rc.1 || 0.2.2-rc.3',
-      '@deepseek-ai/dsh-session': '0.2.2-rc.1 || 0.2.2-rc.3',
+      '@deepseek-ai/dsh-attachment': '0.2.2-rc.1 || 0.2.2-rc.3 || 0.2.2-rc.5',
+      '@deepseek-ai/dsh-llm': '0.2.2-rc.1 || 0.2.2-rc.3 || 0.2.2-rc.5',
+      '@deepseek-ai/dsh-session': '0.2.2-rc.1 || 0.2.2-rc.3 || 0.2.2-rc.5',
     })
     expect(packageJson.peerDependencies?.['@deepseek-ai/dsh-host-webserver']).toBeUndefined()
-    expect(packageJson.devDependencies?.['@deepseek-ai/dsh-host-webserver']).toBe('0.2.2-rc.3')
+    expect(packageJson.devDependencies?.['@deepseek-ai/dsh-host-webserver']).toBe('0.2.2-rc.5')
     expect(patch).toContain("name: '@ipedia/dsh-ichuny-codex'")
   })
 })

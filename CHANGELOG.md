@@ -4,6 +4,23 @@ All notable changes from 2026-11-14 onward are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Added DSH `0.2.2-rc.5` to the supported peer contract and updated the development dependency graph to rc.5.
+- Added `npm run smoke:live` to verify the bundled Codex app server, ChatGPT login, model discovery, a streamed text reply and quota retrieval without reading credential files.
+- Updated the release compatibility gates to exercise both older declared DSH peers, `0.2.2-rc.1` and `0.2.2-rc.3`, instead of the obsolete `0.1.1-rc.2` graph.
+
+### Fixed
+
+- Keep a failed Codex turn's user input eligible for retry; the cursor advances only after successful completion.
+- Allow tool-catalog or system-instructions updates without a new user message to continue with a bounded instruction, while preserving rejection of truly duplicate empty requests.
+
+### Documentation
+
+- Documented the DSH rc.5 host requirement for Node.js 24.9 or newer while retaining Node.js 22.19 support for the plugin and older declared hosts.
+
 ## [1.7.14] - 2026-11-19
 
 ### Security

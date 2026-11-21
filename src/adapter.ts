@@ -41,12 +41,14 @@ type ThreadState = {
   threadId: string
   toolNames: ReadonlySet<string>
   catalogFingerprint: string
+  baseInstructions: string
   readonly pendingCalls: Map<string, PendingToolCall>
   readonly queue: Notification[]
   wake: (() => void) | undefined
   unsubscribe: (() => void) | undefined
   turnId: string | undefined
   lastUserMessageId: string | undefined
+  pendingUserMessageId: string | undefined
 }
 
 const MAX_DYNAMIC_TOOLS = 128
@@ -145,7 +147,12 @@ export class CodexAdapter extends LlmAdapter {
     const pendingTools = (state?.pendingCalls.size ?? 0) > 0
     const freshMessages = pendingTools ? [] : newUserMessages(options.messages, state?.lastUserMessageId ?? replay?.lastUserMessageId)
     const input = pendingTools ? [] : await this.buildUserInput(freshMessages, options.signal)
-    if (input.length === 0 && !pendingTools) throw codexError('Codex request has no new user content', 'EMPTY_INPUT')
+    const baseInstructions = systemInstructions(options)
+    const updatedContext = state !== undefined && !pendingTools && (
+      toolCatalogFingerprint(buildToolSpecs(options.tools ?? [])) !== state.catalogFingerprint
+      || baseInstructions !== state.baseInstructions
+    )
+    if (input.length === 0 && !pendingTools && !updatedContext) throw codexError('Codex request has no new user content', 'EMPTY_INPUT')
     await this.requireLogin(options.signal)
 
     if ((options.tools?.length ?? 0) > 0 && options.sessionId === undefined) {
@@ -153,11 +160,6 @@ export class CodexAdapter extends LlmAdapter {
     }
     if (state === undefined) {
       const toolSpecs = buildToolSpecs(options.tools ?? [])
-      const baseInstructions = options.system ?? options.messages
-        .filter((message) => message.role === 'system')
-        .flatMap((message) => message.content)
-        .filter((block) => block.type === 'text')
-        .map((block) => block.text).join('\n\n')
       const threadOptions = {
         cwd: this.cwd,
         sandbox: this.sandbox,
@@ -172,31 +174,35 @@ export class CodexAdapter extends LlmAdapter {
         threadId: thread.id,
         toolNames: new Set(toolSpecs.map((tool) => tool.name)),
         catalogFingerprint: toolCatalogFingerprint(toolSpecs),
+        baseInstructions,
         pendingCalls: new Map(),
         queue: [],
         wake: undefined,
         unsubscribe: undefined,
         turnId: undefined,
         lastUserMessageId: replay?.lastUserMessageId,
+        pendingUserMessageId: undefined,
       }
       this.threads.set(key, state)
     } else if (state.pendingCalls.size === 0) {
       const toolSpecs = buildToolSpecs(options.tools ?? [])
       const fingerprint = toolCatalogFingerprint(toolSpecs)
-      if (fingerprint !== state.catalogFingerprint) {
+      if (fingerprint !== state.catalogFingerprint || baseInstructions !== state.baseInstructions) {
         if (state.turnId !== undefined) {
-          throw codexError('Codex turn has not completed; cannot replace dynamic tools', 'SESSION_BUSY')
+          throw codexError('Codex turn has not completed; cannot replace thread context', 'SESSION_BUSY')
         }
         const resumed = await this.client.resumeThread({
           threadId: state.threadId,
           cwd: this.cwd,
           sandbox: this.sandbox,
           approvalPolicy: this.approvalPolicy,
+          baseInstructions,
           dynamicTools: toolSpecs,
         }, { ...requestOptions(options.signal), timeoutMs: this.requestTimeoutMs })
         state.threadId = resumed.id
         state.toolNames = new Set(toolSpecs.map((tool) => tool.name))
         state.catalogFingerprint = fingerprint
+        state.baseInstructions = baseInstructions
       }
     }
 
@@ -224,6 +230,7 @@ export class CodexAdapter extends LlmAdapter {
           }
           activeState.pendingCalls.clear()
           activeState.turnId = undefined
+          activeState.pendingUserMessageId = undefined
           await this.interrupt(activeState.threadId, turnId)
           throw failure
         }
@@ -231,7 +238,7 @@ export class CodexAdapter extends LlmAdapter {
         const turn = await this.client.startTurn(
           {
             threadId: activeState.threadId,
-            input,
+            input: input.length > 0 ? input : [{ type: 'text', text: 'Continue with the updated instructions and tools.' }],
             model: options.model,
             ...(options.reasoningEffort === undefined ? {} : { effort: String(options.reasoningEffort) }),
           },
@@ -240,7 +247,7 @@ export class CodexAdapter extends LlmAdapter {
         turnId = turn.id
         activeState.turnId = turnId
         const lastUser = freshMessages.at(-1)
-        if (lastUser?.role === 'user' && lastUser.id !== undefined) activeState.lastUserMessageId = String(lastUser.id)
+        if (lastUser?.role === 'user' && lastUser.id !== undefined) activeState.pendingUserMessageId = String(lastUser.id)
       }
       options.signal?.addEventListener('abort', abort, { once: true })
       let index = 0
@@ -289,6 +296,8 @@ export class CodexAdapter extends LlmAdapter {
         activeState.turnId = undefined
         if (usage !== undefined) yield usageChunk(usage)
         if (completed.params.turn.status === 'completed') {
+          activeState.lastUserMessageId = activeState.pendingUserMessageId ?? activeState.lastUserMessageId
+          activeState.pendingUserMessageId = undefined
           yield {
             type: 'finish',
             reason: { kind: 'stop' },
@@ -298,6 +307,7 @@ export class CodexAdapter extends LlmAdapter {
             } } }),
           }
         } else {
+          activeState.pendingUserMessageId = undefined
           yield { type: 'finish', reason: { kind: completed.params.turn.status === 'interrupted' ? 'aborted' : 'error', failure: { code: 'CODEX_TURN_FAILED', message: safeErrorMessage(completed.params.turn.error?.message ?? 'Codex turn failed') } } }
         }
         return
@@ -497,6 +507,14 @@ function dynamicResultJson(result: ExperimentalDynamicToolResult): JsonObject {
   }
 }
 
+
+function systemInstructions(options: GenerateOptions): string {
+  return options.system ?? options.messages
+    .filter((message) => message.role === 'system')
+    .flatMap((message) => message.content)
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text).join('\n\n')
+}
 
 function replayCandidate(messages: readonly RequestMessage[]): { readonly threadId: string; readonly lastUserMessageId?: string } | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {

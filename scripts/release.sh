@@ -5,9 +5,9 @@
 #   npm run release -- X.Y.Z --dry-run   everything up to the tag; prints the rest
 #   scripts/release.sh --gates-only      the gate alone (what the Linux container runs)
 #
-# GitHub Actions only publishes the tag; nothing there re-runs these checks, so
-# a tag made by hand ships whatever was on the commit. See
-# kb/procedures/sop-release.md.
+# GitHub Actions re-runs the portable gates before publishing, while this script
+# additionally runs the Linux container, compatibility and package-import smoke
+# before creating the release tag. See kb/procedures/sop-release.md.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,9 +17,8 @@ PKG="@ipedia/dsh-ichuny-codex"
 GH_REPO="ipedia825/dsh-ichuny-codex"
 BRANCH="main"
 LINUX_IMAGE="node:24"
-# The older DSH host seams the peer range still promises. The lockfile pins the
-# newest; this set is installed over it in a scratch copy only.
-LEGACY_DSH="@deepseek-ai/dsh-attachment@0.1.1-rc.2 @deepseek-ai/dsh-llm@0.1.1-rc.2 @deepseek-ai/dsh-session@0.1.1-rc.2"
+# Older DSH graphs are installed over the rc.5 lockfile in scratch copies so
+# every declared peer version is exercised before release.
 
 die()  { printf 'release: %s\n' "$*" >&2; exit 1; }
 step() { printf '\n== %s\n' "$*"; }
@@ -58,11 +57,19 @@ tar_tracked() {
     | COPYFILE_DISABLE=1 tar ${tar_flags[@]+"${tar_flags[@]}"} --null -T - -cf -
 }
 
-# DSH 0.1.1-rc.2 compatibility, in a scratch copy so the checkout's
-# node_modules keeps the locked graph. `run` calls this in an `if`, where set -e
+# Test one older declared DSH graph in a scratch copy so the checkout's
+# node_modules keeps the rc.5 lockfile. `run` calls this in an `if`, where set -e
 # does not apply: every step carries its own `|| return 1`.
-legacy_dsh_compat() {
-  local work
+dsh_compat() {
+  local version="$1" work installed
+  local packages=(
+    "@deepseek-ai/dsh-attachment@$version"
+    "@deepseek-ai/dsh-host-webserver@$version"
+    "@deepseek-ai/dsh-llm@$version"
+    "@deepseek-ai/dsh-scope@$version"
+    "@deepseek-ai/dsh-session@$version"
+  )
+  [ "$version" = "0.2.2-rc.1" ] || packages+=("@deepseek-ai/dsh-error@$version")
   work="$(mktemp -d)" || return 1
   # Inside the Linux container there is no .git: the copy is already clean
   # apart from what the gates just installed.
@@ -71,13 +78,12 @@ legacy_dsh_compat() {
   (
     cd "$work" || exit 1
     npm ci --ignore-scripts || exit 1
-    # shellcheck disable=SC2086 # LEGACY_DSH is a word list on purpose
-    npm install --no-save --package-lock=false --ignore-scripts $LEGACY_DSH || exit 1
+    npm install --no-save --package-lock=false --ignore-scripts "${packages[@]}" || exit 1
     # npm ls exits 1 here by design: the override is "invalid" against the
     # devDependency pin. Only the resolved version matters.
     installed="$(npm ls --depth=0 @deepseek-ai/dsh-llm 2>&1 || true)"
     echo "$installed"
-    grep -q 'dsh-llm@0\.1\.1-rc\.2' <<<"$installed" || exit 1
+    grep -Fq "dsh-llm@$version" <<<"$installed" || exit 1
     npm run typecheck || exit 1
     npm test || exit 1
   ) || return 1
@@ -111,7 +117,8 @@ gates() {
   run "SARIF report"                         sarif
   run "package:check (npm pack --dry-run)"   npm run package:check
   run "publish controls in publish.yml"      check_publish_controls
-  run "DSH 0.1.1-rc.2 compatibility"         legacy_dsh_compat
+  run "DSH 0.2.2-rc.1 compatibility"         dsh_compat 0.2.2-rc.1
+  run "DSH 0.2.2-rc.3 compatibility"         dsh_compat 0.2.2-rc.3
   # Summary only; a format change must not fail a green gate.
   sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -E '^ *Tests +[0-9]+ passed' | sed -n '1s/^ */  suite: /p' || true
   grep -E '^All files' "$LOG" | sed -En '1{s/ +/ /g; s/ $//; s/^/  coverage (stmts|branch|funcs|lines): /p;}' || true
@@ -214,7 +221,10 @@ git fetch --quiet origin
 [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$BRANCH")" ] || die "$BRANCH differs from origin/$BRANCH"
 ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "tag $TAG exists locally"
 ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null || die "tag $TAG exists on origin"
-echo "  $BRANCH at $(git rev-parse --short HEAD), clean, in sync; $TAG is free"
+if npm view "$PKG@$VERSION" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
+  die "$PKG@$VERSION already exists on npm"
+fi
+echo "  $BRANCH at $(git rev-parse --short HEAD), clean, in sync; $TAG and npm version are free"
 
 step "2. Version and notes"
 [ "$(node -p "require('./package.json').version")" = "$VERSION" ] || die "package.json is not $VERSION"

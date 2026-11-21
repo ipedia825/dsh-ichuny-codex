@@ -23,7 +23,7 @@
 dsh plugin --profile web add @ipedia/dsh-ichuny-codex --ignore-scripts --workspace-root
 ```
 
-安装完成后重启 `dsh web`，在模型选择器中选择 `My Codex`。上述命令安装 npm 的 `latest`；如需在 `1.7.14` 发布后固定该版本，可使用 `@ipedia/dsh-ichuny-codex@1.7.14` 并添加 `--save-exact`。尚未发布时，可按下文从源码构建并安装本地包。
+安装完成后重启 `dsh web`，在模型选择器中选择 `My Codex`。上述命令安装 npm 的 `latest`；`1.7.15` 发布后可使用 `@ipedia/dsh-ichuny-codex@1.7.15` 并添加 `--save-exact` 固定版本。发布前请按下文从源码构建并安装本地包。
 
 ### 从源码安装
 
@@ -43,7 +43,7 @@ dsh plugin --profile web add "file:$((Get-Location).Path)\$plugin" --save-exact 
 
 ### 运行条件
 
-- Node.js 22.19 或更高版本；peer 声明支持 DSH `0.2.2-rc.1` 和 `0.2.2-rc.3`。两套依赖已分别通过类型检查、现存测试和构建；rc.3 宿主还完成了安装并收到一次 `My Codex` 实际回复。rc.1 宿主固定的旧 Zod 版本仍有高危安全公告，建议尽可能升级至 rc.3。
+- Node.js 22.19 或更高版本；peer 声明支持 DSH `0.2.2-rc.1`、`0.2.2-rc.3` 和 `0.2.2-rc.5`。项目自身仍兼容 Node.js 22.19；DSH rc.5 宿主要求 Node.js 24.9 或更高版本。rc.1 固定的旧 Zod 版本仍有高危安全公告，建议使用 rc.5。
 - 安装依赖时保持 optional dependencies 启用，以便安装 `@openai/codex@0.169.0` 对应平台的原生程序。
 - 运行 DSH 的同一系统用户已通过 Codex CLI 完成 ChatGPT 登录。可运行 `codex login status` 检查；全局 CLI 仅用于检查登录，不决定插件内置程序的版本。
 
@@ -61,7 +61,7 @@ dsh plugin --profile web add "file:$((Get-Location).Path)\$plugin" --save-exact 
 | `approvalPolicy` | `untrusted` | Codex 审批策略：`never`、`on-request`、`untrusted` |
 | `requestTimeoutMs` | `30000` | 单个 app-server 请求超时，范围 1000–300000 毫秒 |
 
-文本对话无需附件服务。图片由 DSH 附件存储读取并转成 data URL；文件以只读路径描述交给 Codex，而不是由插件直接读取任意文件。动态工具由 DSH 执行，支持文本以及来自 DSH 附件存储的图片工具结果（如 `read_image`）；图片经请求投影后作为 Codex `inputImage` 回传，文本不丢失，整批编码后内容以 UTF-8 计不超过 4 MiB。同轮已到达的并发调用会一同交给 DSH，之后才到达的调用留到下一步，只有确实交给 DSH 的调用才要求在本次续接中回传结果。重复、缺失、超限或非文本结果会拒绝已暴露调用的待答批次。已完成的 Codex turn 若遇到 DSH 工具目录增删或 schema 变动，会在下一轮通过 `thread/resume` 更新工具声明；等待工具结果期间保留原目录直至该轮完成。每个 DSH 会话在插件进程中复用同一个 Codex thread；下一轮仅发送游标之后的新 `user` 消息，不再把历史系统指令或 assistant 回复当作新用户输入。新建 thread 时系统提示进入 Codex thread 指令。成功完成的回复把非敏感的 thread ID 和消息游标保存在 DSH replay 元数据中，插件重启后会尝试 `thread/resume`；旧版本已完成的回复没有此元数据，或压缩后游标与回复边界都消失时，无法安全恢复。恢复失败会报错，不会静默新建另一个 thread。
+文本对话无需附件服务。图片由 DSH 附件存储读取并转成 data URL；文件以只读路径描述交给 Codex，而不是由插件直接读取任意文件。动态工具由 DSH 执行，支持文本以及来自 DSH 附件存储的图片工具结果（如 `read_image`）；图片经请求投影后作为 Codex `inputImage` 回传，文本不丢失，整批编码后内容以 UTF-8 计不超过 4 MiB。同轮已到达的并发调用会一同交给 DSH，之后才到达的调用留到下一步，只有确实交给 DSH 的调用才要求在本次续接中回传结果。重复、缺失、超限或非文本结果会拒绝已暴露调用的待答批次。已完成的 Codex turn 若遇到 DSH 工具目录增删或 schema 变动，会在下一轮通过 `thread/resume` 更新工具声明；等待工具结果期间保留原目录直至该轮完成。每个 DSH 会话在插件进程中复用同一个 Codex thread；成功完成的 turn 才推进消息游标，失败的 turn 可重试同一条用户输入。下一轮仅发送游标之后的新 `user` 消息；若只有 DSH 工具目录或系统提示改变，则用一句短指令续接，不重发整段历史。完全没有新输入或工具变化的重复请求仍拒绝为 `EMPTY_INPUT`。新建 thread 时系统提示进入 Codex thread 指令。成功完成的回复把非敏感的 thread ID 和消息游标保存在 DSH replay 元数据中，插件重启后会尝试 `thread/resume`；旧版本已完成的回复没有此元数据，或压缩后游标与回复边界都消失时，无法安全恢复。恢复失败会报错，不会静默新建另一个 thread。
 
 Web 额度控件仅在选择 `my-codex` 时出现。插件通过 `/api/dsh-ichuny-codex/rate-limits` 返回选定的额度字段，成功响应不包含账户 ID；错误消息会经过凭据样式脱敏后返回，但部署到非受信任环境前仍应审查访问控制。额度详情由 Codex 返回的数据决定，无法获取时控件会隐藏。
 
@@ -78,6 +78,6 @@ npm run audit:permissions
 npm run package:check
 ```
 
-`npm test` 运行 [vitest.config.ts](vitest.config.ts) 选中的全部 12 个现存 spec 文件，包含 adapter、动态工具和 Cordis 组合测试。构建、打包和这些自动测试不替代目标 DSH 宿主的实际对话验证；rc.3 的 `My Codex` 实际回复已由用户确认。实现边界与进一步的排障说明见 [架构](kb/reference/architecture.md)、[配置](kb/reference/configuration.md) 和 [常见问题](kb/troubleshooting/common-issues.md)。
+`npm test` 运行 [vitest.config.ts](vitest.config.ts) 选中的全部 12 个现存 spec 文件，包含 adapter、动态工具和 Cordis 组合测试。构建、打包和这些自动测试不替代目标 DSH 宿主的实际对话验证；发布 rc.5 兼容版本前必须在 rc.5 宿主完成 `My Codex` 真实回复验证。实现边界与进一步的排障说明见 [架构](kb/reference/architecture.md)、[配置](kb/reference/configuration.md) 和 [常见问题](kb/troubleshooting/common-issues.md)。
 
 Apache-2.0 许可及原作者归属见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。

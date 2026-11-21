@@ -20,6 +20,7 @@ const MODEL: CodexModel = {
 function createFakeClient() {
   const listeners = new Set<(notification: AppServerNotification) => void>()
   let nextTurn = 0
+  let nextTurnStatus: 'completed' | 'failed' = 'completed'
   const methods = {
     registerServerRequestHandler: vi.fn(() => () => undefined),
     readAccount: vi.fn(async () => ({ authenticated: true, kind: 'chatgpt' as const, requiresOpenaiAuth: true })),
@@ -28,11 +29,13 @@ function createFakeClient() {
     resumeThread: vi.fn(async (request: { readonly threadId: string }) => ({ id: request.threadId })),
     startTurn: vi.fn(async (_request: { readonly input: readonly { readonly type: string; readonly text?: string }[] }) => {
       const id = `turn-${++nextTurn}`
+      const status = nextTurnStatus
+      nextTurnStatus = 'completed'
       queueMicrotask(() => {
         for (const listener of listeners) {
           listener({ method: 'item/reasoning/summaryTextDelta', params: { threadId: 'thread-1', turnId: id, itemId: 'reasoning-1', summaryIndex: 0, delta: 'think' } })
           listener({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: id, itemId: 'message-1', delta: 'answer' } })
-          listener({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id, items: [], status: 'completed', error: null } } })
+          listener({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id, items: [], status, error: status === 'failed' ? { message: 'transient failure' } : null } } })
         }
       })
       return { id, items: [], status: 'inProgress' as const, error: null }
@@ -51,7 +54,7 @@ function createFakeClient() {
     approvalPolicy: 'untrusted',
     requestTimeoutMs: 1_000,
   })
-  return { adapter, methods }
+  return { adapter, methods, failNextTurn: () => { nextTurnStatus = 'failed' } }
 }
 
 function options(sessionId?: string, messageId = 'message-1'): GenerateOptions {
@@ -162,6 +165,54 @@ describe('current Codex adapter', () => {
       expect(restored.methods.startTurn.mock.calls[0]?.[0].input).toEqual([{ type: 'text', text: 'new question' }])
     } finally {
       await restored.adapter.close()
+    }
+  })
+
+  it('retries the same user message after a failed Codex turn', async () => {
+    const { adapter, methods, failNextTurn } = createFakeClient()
+    try {
+      failNextTurn()
+      expect(await collect(adapter.stream(options('session-retry')))).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'finish', reason: expect.objectContaining({ kind: 'error' }) }),
+      ]))
+      await collect(adapter.stream(options('session-retry')))
+      expect(methods.startThread).toHaveBeenCalledOnce()
+      expect(methods.startTurn).toHaveBeenCalledTimes(2)
+      expect(methods.startTurn.mock.calls[1]?.[0].input).toEqual([{ type: 'text', text: 'hello' }])
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('sends a bounded continuation only when the tool catalog changes', async () => {
+    const { adapter, methods } = createFakeClient()
+    try {
+      const first = options('session-tools-only')
+      await collect(adapter.stream(first))
+      const changed = { ...first, tools: [{ name: 'lookup', description: 'Lookup', parameters: { type: 'object' } }] }
+      await collect(adapter.stream(changed))
+      expect(methods.resumeThread).toHaveBeenCalledOnce()
+      expect(methods.startTurn.mock.calls[1]?.[0].input).toEqual([{ type: 'text', text: 'Continue with the updated instructions and tools.' }])
+      await expect(collect(adapter.stream(changed))).rejects.toMatchObject({ failure: { code: 'EMPTY_INPUT' } })
+      expect(methods.startTurn).toHaveBeenCalledTimes(2)
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('resumes updated system instructions without replaying user history', async () => {
+    const { adapter, methods } = createFakeClient()
+    try {
+      const first = { ...options('session-system-update'), system: 'Initial instructions' }
+      await collect(adapter.stream(first))
+      const changed = { ...first, system: 'Updated instructions' }
+      await collect(adapter.stream(changed))
+      expect(methods.resumeThread).toHaveBeenCalledWith(expect.objectContaining({ baseInstructions: 'Updated instructions' }), expect.any(Object))
+      expect(methods.startTurn.mock.calls[1]?.[0].input).toEqual([{ type: 'text', text: 'Continue with the updated instructions and tools.' }])
+      await expect(collect(adapter.stream(changed))).rejects.toMatchObject({ failure: { code: 'EMPTY_INPUT' } })
+      expect(methods.startThread).toHaveBeenCalledOnce()
+    } finally {
+      await adapter.close()
     }
   })
 

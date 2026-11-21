@@ -2,16 +2,16 @@
 title: "Codex App-Server Protocol Surface"
 category: reference
 service: dsh-ichuny-codex
-version: "1.7.14"
+version: "1.7.15"
 tags: [codex, app-server, json-rpc, protocol, streaming]
 created: "2026-08-26"
-last_updated: "2026-11-16"
+last_updated: "2026-11-20"
 description: "Records the app-server methods and wire boundaries used by the current plugin."
 ---
 
 # App-Server Protocol
 
-The plugin starts the pinned native Codex executable directly with `app-server --listen stdio://`, then exchanges one JSON object per line over stdio. `AppServerClient` sends `initialize`, validates the response and sends `initialized`. `apply()` sets `experimentalApi: true` and `requestAttestation: false`. The current client information is `name: softspark_dsh_codex`, `title: SoftSpark DSH Codex`, and version `1.7.7`; client identity is separate from the npm package and provider names. [PATH: src/app-server/transport.ts] [PATH: src/app-server/client.ts] [PATH: src/index.ts]
+The plugin starts the pinned native Codex executable directly with `app-server --listen stdio://`, then exchanges one JSON object per line over stdio. `AppServerClient` sends `initialize`, validates the response and sends `initialized`. `apply()` sets `experimentalApi: true` and `requestAttestation: false`. The current client information is `name: softspark_dsh_codex`, `title: SoftSpark DSH Codex`, and version `1.7.15`; client identity is separate from the npm package and provider names. [PATH: src/app-server/transport.ts] [PATH: src/app-server/client.ts] [PATH: src/index.ts]
 
 ## Used requests
 
@@ -24,7 +24,7 @@ The plugin starts the pinned native Codex executable directly with `app-server -
 | `turn/start` | Send user input and selected model/reasoning effort. |
 | `turn/interrupt` | Attempt to interrupt an aborted turn. |
 
-`AppServerClient` exposes `thread/resume`. The adapter uses it between completed turns when tool declarations differ, and after plugin reload when the latest matching DSH assistant reply has validated adapter replay metadata. Successful replies persist a non-secret thread ID and last consumed DSH user-message ID; only new user-role messages are sent to `turn/start`. Failed resumes do not silently create replacement threads. Pending tool calls remain in memory and are answered with their original catalog before any directory update. [PATH: src/app-server/client.ts] [PATH: src/adapter.ts]
+`AppServerClient` exposes `thread/resume`. The adapter uses it between completed turns when tool declarations differ, and after plugin reload when the latest matching DSH assistant reply has validated adapter replay metadata. Successful replies persist a non-secret thread ID and last successfully completed DSH user-message ID; only new user-role messages are sent to `turn/start`. Failed turns leave the cursor unchanged so retries may send the same input. A catalog or system-instructions update sends one bounded continuation after `thread/resume`; requests with neither new input nor a context change are refused as `EMPTY_INPUT`. Failed resumes do not silently create replacement threads. Pending tool calls remain in memory and are answered with their original catalog before any directory update. [PATH: src/app-server/client.ts] [PATH: src/adapter.ts]
 
 ## Stream and server requests
 
