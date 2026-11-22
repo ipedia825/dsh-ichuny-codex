@@ -39,6 +39,7 @@ type PendingToolCall = {
 
 type ThreadState = {
   threadId: string
+  cwd: string
   toolNames: ReadonlySet<string>
   catalogFingerprint: string
   baseInstructions: string
@@ -56,6 +57,9 @@ const MAX_DYNAMIC_TOOL_ARGUMENT_BYTES = 262_144
 const MAX_DYNAMIC_TOOL_CALL_ID_BYTES = 256
 const MAX_DYNAMIC_TOOL_RESULT_BYTES = 4 * 1024 * 1024
 const MAX_DYNAMIC_TOOL_IMAGES = 8
+function dshToolInstructions(cwd: string): string {
+  return `This DSH session supplies run_code as its coding tool. The current Codex thread working directory is ${JSON.stringify(cwd)}. The app-server process directory is not the session workspace or a writable-root grant. For requests to inspect project files or implement code, attempt run_code before reporting that tools failed or merely restating the task. Do not claim that a write or approval failed unless the tool actually returned that failure. Respect all DSH sandbox and approval decisions; report actual tool errors rather than inventing them.`
+}
 const DYNAMIC_TOOL_NAME = /^[A-Za-z0-9_-]+$/u
 
 function codexError(message: string, code: string): LlmError {
@@ -69,12 +73,14 @@ export interface CodexAdapterOptions {
   readonly sandbox: 'read-only' | 'workspace-write' | 'danger-full-access'
   readonly approvalPolicy: 'never' | 'on-request' | 'untrusted'
   readonly requestTimeoutMs: number
+  readonly sessionCwd?: (sessionId: GenerateOptions['sessionId']) => string | undefined
   readonly attachments?: () => AttachmentStore | undefined
 }
 
 export class CodexAdapter extends LlmAdapter {
   private readonly client: AppServerClient
   private readonly cwd: string
+  private readonly sessionCwd: ((sessionId: GenerateOptions['sessionId']) => string | undefined) | undefined
   private readonly sandbox: CodexAdapterOptions['sandbox']
   private readonly approvalPolicy: CodexAdapterOptions['approvalPolicy']
   private readonly requestTimeoutMs: number
@@ -86,6 +92,7 @@ export class CodexAdapter extends LlmAdapter {
     super()
     this.client = options.client
     this.cwd = options.cwd
+    this.sessionCwd = options.sessionCwd
     this.sandbox = options.sandbox
     this.approvalPolicy = options.approvalPolicy
     this.requestTimeoutMs = options.requestTimeoutMs
@@ -139,39 +146,47 @@ export class CodexAdapter extends LlmAdapter {
     }
   }
 
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(options: GenerateOptions<string>): AsyncIterable<StreamChunk> {
     this.assertProvider(options.provider)
-    const key = options.sessionId === undefined ? `ephemeral:${randomUUID()}` : String(options.sessionId)
+    const auxiliary = options.purpose !== undefined
+    const key = auxiliary || options.sessionId === undefined ? `ephemeral:${randomUUID()}` : String(options.sessionId)
     let state = this.threads.get(key)
-    const replay = state === undefined && options.sessionId !== undefined ? replayCandidate(options.messages) : undefined
+    const replay = state === undefined && !auxiliary && options.sessionId !== undefined ? replayCandidate(options.messages) : undefined
     const pendingTools = (state?.pendingCalls.size ?? 0) > 0
-    const freshMessages = pendingTools ? [] : newUserMessages(options.messages, state?.lastUserMessageId ?? replay?.lastUserMessageId)
-    const input = pendingTools ? [] : await this.buildUserInput(freshMessages, options.signal)
+    const freshMessages = pendingTools ? [] : auxiliary ? options.messages : newUserMessages(options.messages, state?.lastUserMessageId ?? replay?.lastUserMessageId)
+    const input = pendingTools ? [] : auxiliary ? await this.buildAuxiliaryInput(freshMessages, options.signal) : await this.buildUserInput(freshMessages, options.signal)
     const baseInstructions = systemInstructions(options)
+    const cwd = this.sessionCwd?.(options.sessionId) ?? this.cwd
     const updatedContext = state !== undefined && !pendingTools && (
       toolCatalogFingerprint(buildToolSpecs(options.tools ?? [])) !== state.catalogFingerprint
       || baseInstructions !== state.baseInstructions
+      || cwd !== state.cwd
     )
     if (input.length === 0 && !pendingTools && !updatedContext) throw codexError('Codex request has no new user content', 'EMPTY_INPUT')
     await this.requireLogin(options.signal)
 
-    if ((options.tools?.length ?? 0) > 0 && options.sessionId === undefined) {
+    if ((options.tools?.length ?? 0) > 0 && options.sessionId === undefined && !auxiliary) {
       throw codexError('Dynamic tools require a persistent DSH session id', 'DYNAMIC_TOOLS_REQUIRE_SESSION')
     }
     if (state === undefined) {
-      const toolSpecs = buildToolSpecs(options.tools ?? [])
+      const toolSpecs = buildToolSpecs(auxiliary ? [] : options.tools ?? [])
       const threadOptions = {
-        cwd: this.cwd,
-        sandbox: this.sandbox,
-        approvalPolicy: this.approvalPolicy,
+        cwd,
+        sandbox: auxiliary ? 'read-only' as const : this.sandbox,
+        approvalPolicy: auxiliary ? 'never' as const : this.approvalPolicy,
         ...(baseInstructions.length === 0 ? {} : { baseInstructions }),
+        ...(toolSpecs.some((tool) => tool.name === 'run_code') ? { developerInstructions: dshToolInstructions(cwd) } : {}),
         ...(toolSpecs.length === 0 ? {} : { dynamicTools: toolSpecs }),
       }
       const thread = replay === undefined
         ? await this.client.startThread(threadOptions, { ...requestOptions(options.signal), timeoutMs: this.requestTimeoutMs })
         : await this.client.resumeThread({ ...threadOptions, threadId: replay.threadId, dynamicTools: toolSpecs }, { ...requestOptions(options.signal), timeoutMs: this.requestTimeoutMs })
+      if (replay !== undefined && thread.id !== replay.threadId) {
+        throw codexError('Codex did not resume the original thread; refusing to lose previous task context', 'SESSION_THREAD_MISMATCH')
+      }
       state = {
         threadId: thread.id,
+        cwd,
         toolNames: new Set(toolSpecs.map((tool) => tool.name)),
         catalogFingerprint: toolCatalogFingerprint(toolSpecs),
         baseInstructions,
@@ -187,19 +202,21 @@ export class CodexAdapter extends LlmAdapter {
     } else if (state.pendingCalls.size === 0) {
       const toolSpecs = buildToolSpecs(options.tools ?? [])
       const fingerprint = toolCatalogFingerprint(toolSpecs)
-      if (fingerprint !== state.catalogFingerprint || baseInstructions !== state.baseInstructions) {
+      if (fingerprint !== state.catalogFingerprint || baseInstructions !== state.baseInstructions || cwd !== state.cwd) {
         if (state.turnId !== undefined) {
           throw codexError('Codex turn has not completed; cannot replace thread context', 'SESSION_BUSY')
         }
         const resumed = await this.client.resumeThread({
           threadId: state.threadId,
-          cwd: this.cwd,
+          cwd,
           sandbox: this.sandbox,
           approvalPolicy: this.approvalPolicy,
           baseInstructions,
+          ...(toolSpecs.some((tool) => tool.name === 'run_code') ? { developerInstructions: dshToolInstructions(cwd) } : {}),
           dynamicTools: toolSpecs,
         }, { ...requestOptions(options.signal), timeoutMs: this.requestTimeoutMs })
         state.threadId = resumed.id
+        state.cwd = cwd
         state.toolNames = new Set(toolSpecs.map((tool) => tool.name))
         state.catalogFingerprint = fingerprint
         state.baseInstructions = baseInstructions
@@ -210,6 +227,8 @@ export class CodexAdapter extends LlmAdapter {
     const activeState: ThreadState = state
     if (activeState.unsubscribe === undefined) {
       activeState.unsubscribe = this.client.onNotification((notification) => {
+        const threadId = notification.params?.['threadId']
+        if (threadId !== undefined && threadId !== activeState.threadId) return
         activeState.queue.push(notification)
         activeState.wake?.()
         activeState.wake = undefined
@@ -301,7 +320,7 @@ export class CodexAdapter extends LlmAdapter {
           yield {
             type: 'finish',
             reason: { kind: 'stop' },
-            ...(options.sessionId === undefined ? {} : { replayState: { response: {
+            ...(options.sessionId === undefined || auxiliary ? {} : { replayState: { response: {
               version: 1, threadId: activeState.threadId,
               lastUserMessageId: activeState.lastUserMessageId ?? null,
             } } }),
@@ -317,12 +336,26 @@ export class CodexAdapter extends LlmAdapter {
       throw error instanceof LlmError ? error : codexError(safeErrorMessage(error), 'CODEX_APP_SERVER')
     } finally {
       options.signal?.removeEventListener('abort', abort)
-      if (activeState.pendingCalls.size === 0 || options.sessionId === undefined) {
+      if (activeState.pendingCalls.size === 0 || auxiliary || options.sessionId === undefined) {
         activeState.unsubscribe?.()
         activeState.unsubscribe = undefined
       }
-      if (options.sessionId === undefined) this.threads.delete(key)
+      if (auxiliary || options.sessionId === undefined) this.threads.delete(key)
     }
+  }
+
+  private async buildAuxiliaryInput(messages: readonly RequestMessage[], signal: AbortSignal | undefined): Promise<readonly CodexUserInput[]> {
+    const input: CodexUserInput[] = []
+    for (const message of messages) {
+      if (message.role === 'system' || message.role === 'developer') continue
+      if (message.role === 'user') {
+        input.push(...await this.buildUserInput([message], signal))
+        continue
+      }
+      const text = message.content.filter((block) => block.type === 'text').map((block) => block.text).join('\n')
+      if (text.length > 0) input.push({ type: 'text', text: `${message.role}: ${text}` })
+    }
+    return input
   }
 
   private async buildUserInput(
@@ -331,8 +364,12 @@ export class CodexAdapter extends LlmAdapter {
   ): Promise<readonly CodexUserInput[]> {
     const input: CodexUserInput[] = []
     const store = this.attachments?.()
-    for (const message of messages) {
-      if (message.role !== 'user') continue
+    const userMessages = messages.filter((message) => message.role === 'user')
+    const ordered = [
+      ...userMessages.filter((message) => message.source !== undefined && message.source.kind !== 'user'),
+      ...userMessages.filter((message) => message.source === undefined || message.source.kind === 'user'),
+    ]
+    for (const message of ordered) {
       for (const block of message.content) {
         if (block.type === 'text') {
           if (block.text.length > 0) input.push({ type: 'text', text: block.text })
@@ -508,7 +545,7 @@ function dynamicResultJson(result: ExperimentalDynamicToolResult): JsonObject {
 }
 
 
-function systemInstructions(options: GenerateOptions): string {
+function systemInstructions(options: GenerateOptions<string>): string {
   return options.system ?? options.messages
     .filter((message) => message.role === 'system')
     .flatMap((message) => message.content)

@@ -16,7 +16,7 @@ The Cordis plugin entry is `llm-codex`; the LLM provider ID is `my-codex`. The d
 | Field | Default | Accepted values |
 |---|---|---|
 | `command` | `bundled` | Native Codex executable path, or `bundled` to use the pinned `@openai/codex` platform binary. Empty strings fail. |
-| `cwd` | `process.cwd()` | Nonempty working directory for new Codex threads. |
+| `cwd` | Effective DSH session directory when `sessions` and `workingDirectory` are mounted; otherwise `process.cwd()` | Explicit nonempty working directory for Codex threads overrides the session directory. |
 | `sandbox` | `workspace-write` | `read-only`, `workspace-write`, `danger-full-access`. |
 | `approvalPolicy` | `untrusted` | `never`, `on-request`, `untrusted`. |
 | `requestTimeoutMs` | `30000` | Safe integer from 1,000 through 300,000 milliseconds for app-server requests. |
@@ -32,6 +32,8 @@ An existing Codex CLI `chatgpt` login is required for model discovery, generatio
 ## Optional services and tools
 
 The DSH `llm` service is required. An attachment store is optional for text requests but required for image and file blocks. A web server is optional for the quota route; the bundled Web client requires that route to show quota. The adapter uses `experimentalApi: true` on every app-server connection. When a request contains DSH tools, a persistent `sessionId` is required; there is no `experimentalDynamicTools` configuration flag. [PATH: src/index.ts] [PATH: src/adapter.ts] [PATH: client.js]
+
+The `sessions` and `workingDirectory` services are optional. When both are mounted, each request reads the live DSH session's effective cwd rather than reusing the Web host's launch directory; if only `sessions` exists it uses the session header's initial cwd. Explicit `cwd` wins in all cases. Changing a session directory updates an existing Codex thread via `thread/resume` between turns. [PATH: src/index.ts] [PATH: src/adapter.ts]
 
 The current plugin does not expose `provider`, `allowApiKeyAuth`, `inheritSessionPermissions`, `dynamicToolTimeoutMs` or `turnTimeoutMs` configuration fields. The separate `resolveSessionPermissions` helper is not wired into `apply()`. In-process threads keep a DSH user-message cursor; successful replies also persist the non-secret Codex thread ID and cursor in DSH replay metadata. A new adapter can resume a thread from that metadata, but older replies have no replay state and pending tool calls cannot survive restart. [PATH: src/index.ts] [PATH: src/adapter.ts] [PATH: src/session-permissions.ts]
 

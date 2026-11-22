@@ -16,10 +16,12 @@ function options(messages: Message[], tools: GenerateOptions['tools'] = [TOOL]):
 function fakeClient() {
   const listeners = new Set<(notification: AppServerNotification) => void>()
   let handler: ServerRequestHandler | undefined
+  let threadCounter = 0
+  let turnCounter = 0
   const methods = {
     readAccount: vi.fn(async () => ({ authenticated: true, kind: 'chatgpt' as const, requiresOpenaiAuth: true })),
-    startThread: vi.fn(async () => ({ id: 'thread-1' })),
-    startTurn: vi.fn(async () => ({ id: 'turn-1', items: [], status: 'inProgress' as const, error: null })),
+    startThread: vi.fn(async (_request: { readonly sandbox?: string; readonly approvalPolicy?: string; readonly dynamicTools?: unknown }) => ({ id: `thread-${++threadCounter}` })),
+    startTurn: vi.fn(async (_request: { readonly input: readonly { readonly type: string; readonly text?: string }[] }) => ({ id: `turn-${++turnCounter}`, items: [], status: 'inProgress' as const, error: null })),
     onNotification: vi.fn((listener: (notification: AppServerNotification) => void) => {
       listeners.add(listener)
       return () => { listeners.delete(listener) }
@@ -72,6 +74,42 @@ async function beginToolCall(fake: ReturnType<typeof fakeClient>, adapter: Codex
 }
 
 describe('current DSH dynamic tools', () => {
+  it.each(['completed', 'failed'] as const)('keeps the main tool call pending when compaction is %s', async (status) => {
+    const fake = fakeClient()
+    const adapter = new CodexAdapter({ client: fake.client, cwd: '/workspace', sandbox: 'workspace-write', approvalPolicy: 'untrusted', requestTimeoutMs: 1_000 })
+    try {
+      const { response } = await beginToolCall(fake, adapter)
+      const summaryInstruction = { role: 'user' as const, content: [{ type: 'text' as const, text: 'Summarize the conversation without tools.' }] }
+      const summary = collect(adapter.stream({ ...options([USER]), purpose: 'compaction', messages: [
+        USER,
+        { id: MessageId('assistant-previous'), role: 'assistant', source: { kind: 'model', provider: CODEX_PROVIDER, model: 'test-model' }, content: [{ type: 'text', text: 'prior work' }] },
+        summaryInstruction,
+      ] }))
+      await vi.waitFor(() => expect(fake.methods.startTurn).toHaveBeenCalledTimes(2))
+      expect(fake.methods.startThread).toHaveBeenCalledTimes(2)
+      expect(fake.methods.startThread.mock.calls[1]?.[0]).toMatchObject({ sandbox: 'read-only', approvalPolicy: 'never' })
+      expect(fake.methods.startThread.mock.calls[1]?.[0]).not.toHaveProperty('dynamicTools')
+      const summaryInput = fake.methods.startTurn.mock.calls[1]?.[0].input as Array<{ type: string; text?: string }>
+      expect(summaryInput.map((entry) => entry.text)).toEqual(['find a value', 'assistant: prior work', 'Summarize the conversation without tools.'])
+      if (status === 'completed') fake.emit({ method: 'item/agentMessage/delta', params: { threadId: 'thread-2', turnId: 'turn-2', itemId: 'summary-message', delta: 'Summary checkpoint' } })
+      fake.emit({ method: 'turn/completed', params: { threadId: 'thread-2', turn: { id: 'turn-2', items: [], status, error: status === 'failed' ? { message: 'summary failed' } : null } } })
+      const summaryChunks = await summary
+      if (status === 'completed') expect(summaryChunks).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'text-delta', text: 'Summary checkpoint' })]))
+      expect(summaryChunks.find((chunk) => chunk.type === 'finish')).toMatchObject({ reason: { kind: status === 'failed' ? 'error' : 'stop' } })
+      expect(summaryChunks.find((chunk) => chunk.type === 'finish')).not.toHaveProperty('replayState')
+      const continuation = collect(adapter.stream(options([toolResult('found')])))
+      await expect(response).resolves.toMatchObject({ contentItems: [{ type: 'inputText', text: 'found' }] })
+      fake.emit({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', items: [], status: 'completed', error: null } } })
+      const mainChunks = await continuation
+      expect(mainChunks).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'finish', reason: { kind: 'stop' } })]))
+      expect(mainChunks.find((chunk) => chunk.type === 'finish')).toMatchObject({ replayState: { response: { threadId: 'thread-1', lastUserMessageId: 'user-1' } } })
+      expect(fake.methods.startTurn).toHaveBeenCalledTimes(2)
+      expect(fake.methods.interruptTurn).not.toHaveBeenCalled()
+    } finally {
+      await adapter.close()
+    }
+  })
+
   it('routes a Codex call through DSH and returns a correlated text result', async () => {
     const fake = fakeClient()
     const adapter = new CodexAdapter({ client: fake.client, cwd: '/workspace', sandbox: 'workspace-write', approvalPolicy: 'untrusted', requestTimeoutMs: 1_000 })

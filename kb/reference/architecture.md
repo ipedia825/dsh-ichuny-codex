@@ -11,7 +11,7 @@ description: "Describes the current provider, app-server transport, attachment h
 
 # Architecture
 
-`@ipedia/dsh-ichuny-codex` is a Cordis plugin named `dsh-ichuny-codex`. Its patch inserts `llm-codex`; the actual LLM provider ID is `my-codex`, displayed as `My Codex`. The plugin requires the DSH `llm` service and injects `attachments` and `webServer` optionally. \[PATH: src/index.ts] \[PATH: src/adapter.ts] \[PATH: cordis.patch.yml]
+`@ipedia/dsh-ichuny-codex` is a Cordis plugin named `dsh-ichuny-codex`. Its patch inserts `llm-codex`; the actual LLM provider ID is `my-codex`, displayed as `My Codex`. The plugin requires the DSH `llm` service and injects `sessions`, `workingDirectory`, `attachments` and `webServer` optionally. \[PATH: src/index.ts] \[PATH: src/adapter.ts] \[PATH: cordis.patch.yml]
 
 ## Runtime path
 
@@ -24,6 +24,10 @@ description: "Describes the current provider, app-server transport, attachment h
 ## State and limits
 
 Codex threads are cached by DSH session ID within a process. Acknowledged `turn/start` records a pending user message ID; only a successful `turn/completed` advances the durable input cursor. A failed turn may retry the same input. Subsequent successful turns only project user-role messages after that cursor. When only the DSH tool catalog or system instructions change, Codex `thread/resume` updates the thread context and a bounded continuation is sent instead of replaying the old user message; an identical request without new work is still refused. System text on a newly created thread is supplied as `baseInstructions`, never replayed as user text. Successful replies persist the Codex thread ID and cursor in DSH assistant replay state, allowing a later adapter generation to call `thread/resume`. Old assistant messages without replay state and histories with neither a cursor nor a safe assistant boundary cannot recover the prior thread. A completed in-memory thread is also resumed with updated `dynamicTools` when the DSH catalog changes. \[PATH: src/adapter.ts]
+
+The plugin reads the effective per-session directory from optional `sessions` and `workingDirectory` services when it creates or resumes a Codex thread; an explicit `cwd` setting takes precedence. Changing the DSH directory updates the same Codex thread at the next turn boundary. Without those services, it falls back to the configured/default host cwd. Compaction and other DSH auxiliary-purpose requests use separate temporary read-only Codex threads even when DSH supplies the ordinary session ID. They cannot register DSH dynamic tools and do not mutate the main thread's in-flight tool calls or user-message cursor. [PATH: src/adapter.ts]
+
+User-role context injected by DSH is projected before the human user request in a new Codex turn so administrative time/skill metadata cannot be the final instruction. When DSH exposes `run_code`, Codex receives a short developer instruction to attempt the tool before claiming failure; tool use is still the model's choice. A `thread/resume` reply whose ID differs from the requested thread is rejected to avoid silently losing prior tasks. \[PATH: src/adapter.ts]
 
 Tool limits include 128 catalog entries, 16 concurrent unanswered calls, 256 KiB per serialized argument payload, 256-byte UTF-8 call IDs, eight images and 4 MiB aggregate encoded UTF-8 tool results. Duplicate or already-aborted incoming calls are refused before registration. Duplicate, missing, oversized and unsupported result blocks fail the batch before any pending call is answered; failures reject pending calls and interrupt the turn. A change to tool names, descriptions, or schemas is validated and applied with `thread/resume` between completed turns; tool results in flight use their original catalog. Server requests are bounded by the client timeout and cancellation. \[PATH: src/adapter.ts] \[PATH: src/app-server/client.ts]
 

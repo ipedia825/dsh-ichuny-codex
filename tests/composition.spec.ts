@@ -154,6 +154,39 @@ describe('plugin composition', () => {
     await cleanup?.()
   })
 
+  it('resolves the current DSH session directory without overriding explicit cwd', () => {
+    const ctx = createContext()
+    const session = { header: { cwd: 'F:\\dsh\\projects\\dsh-work' } }
+    const get = vi.fn(() => session)
+    const current = vi.fn(() => 'F:\\dsh\\projects\\dsh-work\\src')
+    ctx.inject.mockImplementation((services: readonly string[], callback: (scope: unknown) => void) => {
+      if (services[0] === 'sessions') callback({ sessions: { get }, effect: vi.fn() })
+      if (services[0] === 'workingDirectory') callback({ workingDirectory: { get: current }, effect: vi.fn() })
+    })
+    apply(ctx as never, { command: 'codex' })
+    const adapter = ctx.llm.registerAdapter.mock.calls[0]?.[1] as { sessionCwd: (id: string) => string | undefined }
+    expect(adapter.sessionCwd('test-session')).toBe('F:\\dsh\\projects\\dsh-work\\src')
+    expect(current).toHaveBeenCalledWith(session)
+    expect(adapter.sessionCwd(undefined as never)).toBeUndefined()
+
+    const headerOnly = createContext()
+    headerOnly.inject.mockImplementation((services: readonly string[], callback: (scope: unknown) => void) => {
+      if (services[0] === 'sessions') callback({ sessions: { get }, effect: vi.fn() })
+    })
+    apply(headerOnly as never, { command: 'codex' })
+    const fallback = headerOnly.llm.registerAdapter.mock.calls[0]?.[1] as { sessionCwd: (id: string) => string | undefined }
+    expect(fallback.sessionCwd('test-session')).toBe(session.header.cwd)
+
+    const override = createContext()
+    override.inject.mockImplementation((services: readonly string[], callback: (scope: unknown) => void) => {
+      if (services[0] === 'sessions') callback({ sessions: { get }, effect: vi.fn() })
+      if (services[0] === 'workingDirectory') callback({ workingDirectory: { get: current }, effect: vi.fn() })
+    })
+    apply(override as never, { command: 'codex', cwd: 'F:\\explicit' })
+    const explicit = override.llm.registerAdapter.mock.calls[0]?.[1] as { sessionCwd: (id: string) => string | undefined }
+    expect(explicit.sessionCwd('test-session')).toBeUndefined()
+  })
+
   it('requests attachments and webServer through optional injection', () => {
     const ctx = createContext()
     const webServer = { register: vi.fn() }

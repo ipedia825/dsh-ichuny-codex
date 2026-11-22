@@ -1,6 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
+import { SessionId, type SessionStore } from '@deepseek-ai/dsh-session'
+import type { WorkingDirectoryService } from '@deepseek-ai/dsh-working-directory'
 import z from '@deepseek-ai/schemastery'
 
 import { bundledCodexCommand } from './codex-command.js'
@@ -55,6 +57,16 @@ export function apply(ctx: Context, config: Config = {}): void {
     requestTimeoutMs: resolved.requestTimeoutMs,
   })
   let attachments: AttachmentStore | undefined
+  let sessions: SessionStore | undefined
+  let workingDirectory: WorkingDirectoryService | undefined
+  ctx.inject(['sessions'], (sessionCtx) => {
+    sessions = sessionCtx.sessions
+    sessionCtx.effect(() => () => { sessions = undefined }, `${name}: detach sessions`)
+  })
+  ctx.inject(['workingDirectory'], (directoryCtx) => {
+    workingDirectory = directoryCtx.workingDirectory
+    directoryCtx.effect(() => () => { workingDirectory = undefined }, `${name}: detach working directory`)
+  })
   ctx.inject(['attachments'], (attachmentCtx) => {
     attachments = attachmentCtx.attachments
     attachmentCtx.effect(() => () => { attachments = undefined }, `${name}: detach attachments`)
@@ -65,6 +77,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     sandbox: resolved.sandbox,
     approvalPolicy: resolved.approvalPolicy,
     requestTimeoutMs: resolved.requestTimeoutMs,
+    sessionCwd: (sessionId) => {
+      if (config.cwd !== undefined || sessionId === undefined) return undefined
+      const session = sessions?.get(SessionId(String(sessionId)))
+      if (session === undefined) return undefined
+      return workingDirectory?.get(session) ?? session.header.cwd
+    },
     attachments: () => attachments,
   })
   ctx.inject(['webServer'], (webCtx) => {

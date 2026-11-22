@@ -5,7 +5,7 @@ service: dsh-ichuny-codex
 version: "1.7.15"
 tags: [sop, release, npm, provenance, packaging]
 created: "2026-08-26"
-last_updated: "2026-11-20"
+last_updated: "2026-11-22"
 description: "Lists current local release blockers and the checks required before enabling publication."
 ---
 
@@ -13,7 +13,7 @@ description: "Lists current local release blockers and the checks required befor
 
 ## Current status
 
-The 1.7.15 candidate extends the peer contract to DSH 0.2.2-rc.5 and moves the locked development graph to rc.5. On 2026-11-20, the rc.1, rc.3 and rc.5 dependency graphs passed typecheck and all 130 tests; the rc.5 graph also passed coverage, build, source and permission audits, the high-severity dependency threshold, registry signature verification and package inspection. A locally packed artifact installed into an isolated rc.5 profile, where `llm-codex` loaded with a complete configuration schema and no composition diagnostics. Publication remains blocked because the bundled Codex app server could not open its own state database for the authenticated Windows user, so the required streamed rc.5 conversation did not run. Prior rc.3 evidence does not establish rc.5 end-to-end compatibility. [PATH: .github/workflows/publish.yml] [PATH: package.json] [PATH: scripts/live-smoke.mjs] [PATH: CHANGELOG.md]
+The 1.7.15 candidate extends the peer contract to DSH 0.2.2-rc.5 and moves the locked development graph to rc.5. The rc.1, rc.3 and rc.5 dependency graphs previously passed typecheck and the configured tests. The rc.5 candidate installed into the Web profile from a local tarball whose built adapter and entry match the current build; the user confirms a real My Codex reply on the rc.5 host. The separate `npm run smoke:live` attempt from this agent's Windows environment still failed because Codex could not access its user state directory; it is not recorded as passing. The current local release gates must be rerun after final edits. The tag-triggered workflow uses Node.js 24.9.0 for rc.5 and performs Linux gates before npm provenance publication. [PATH: .github/workflows/publish.yml] [PATH: package.json] [PATH: scripts/live-smoke.mjs] [PATH: CHANGELOG.md]
 
 ## Prepare a candidate
 

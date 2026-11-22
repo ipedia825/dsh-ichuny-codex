@@ -17,7 +17,7 @@ const MODEL: CodexModel = {
   defaultReasoningEffort: 'medium',
 }
 
-function createFakeClient() {
+function createFakeClient(sessionCwd?: (sessionId: GenerateOptions['sessionId']) => string | undefined) {
   const listeners = new Set<(notification: AppServerNotification) => void>()
   let nextTurn = 0
   let nextTurnStatus: 'completed' | 'failed' = 'completed'
@@ -50,6 +50,7 @@ function createFakeClient() {
   const adapter = new CodexAdapter({
     client: methods as unknown as AppServerClient,
     cwd: '/workspace',
+    ...(sessionCwd === undefined ? {} : { sessionCwd }),
     sandbox: 'workspace-write',
     approvalPolicy: 'untrusted',
     requestTimeoutMs: 1_000,
@@ -141,6 +142,103 @@ describe('current Codex adapter', () => {
       expect(methods.startTurn.mock.calls[0]?.[0].input).toEqual([{ type: 'text', text: 'hello' }])
     } finally {
       await adapter.close()
+    }
+  })
+
+  it('starts in the DSH session cwd and updates it when the directory changes', async () => {
+    let current = 'F:\\dsh\\projects\\dsh-work'
+    const { adapter, methods } = createFakeClient(() => current)
+    try {
+      await collect(adapter.stream(options('session-directory')))
+      expect(methods.startThread).toHaveBeenCalledWith(expect.objectContaining({ cwd: current }), expect.any(Object))
+      current = 'F:\\dsh\\projects\\dsh-work\\app'
+      await collect(adapter.stream({ ...options('session-directory', 'message-2'), messages: [
+        ...options('session-directory').messages,
+        { id: MessageId('message-2'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'continue in app' }] },
+      ] }))
+      expect(methods.resumeThread).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1', cwd: current }), expect.any(Object))
+      expect(methods.startThread).toHaveBeenCalledOnce()
+      expect(methods.startTurn.mock.calls[1]?.[0].input).toEqual([{ type: 'text', text: 'continue in app' }])
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('puts host context before the actionable user request in a new Codex turn', async () => {
+    const { adapter, methods } = createFakeClient()
+    try {
+      const human = options('session-work').messages[0]
+      if (human === undefined) throw new Error('missing test user input')
+      const runtime = { id: MessageId('context-1'), role: 'user', source: { kind: 'runtime-context' }, content: [{ type: 'text', text: 'Current working directory: F:/dsh/projects/dsh-work' }] } as unknown as GenerateOptions['messages'][number]
+      const time = { id: MessageId('time-1'), role: 'user', source: { kind: 'time-context' }, content: [{ type: 'text', text: 'Time sampled while preparing turn' }] } as unknown as GenerateOptions['messages'][number]
+      await collect(adapter.stream({ ...options('session-work'), messages: [human, runtime, time] }))
+      expect(methods.startTurn.mock.calls[0]?.[0].input).toEqual([
+        { type: 'text', text: 'Current working directory: F:/dsh/projects/dsh-work' },
+        { type: 'text', text: 'Time sampled while preparing turn' },
+        { type: 'text', text: 'hello' },
+      ])
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('keeps the new human follow-up last on a reused thread', async () => {
+    const { adapter, methods } = createFakeClient()
+    try {
+      const first = options('session-followup').messages[0]
+      if (first === undefined) throw new Error('missing test user input')
+      await collect(adapter.stream({ ...options('session-followup'), messages: [first] }))
+      const time = { id: MessageId('time-2'), role: 'user', source: { kind: 'time-context' }, content: [{ type: 'text', text: 'Time sampled for the follow-up' }] } as unknown as GenerateOptions['messages'][number]
+      const next = { id: MessageId('message-2'), role: 'user' as const, source: { kind: 'user' as const }, content: [{ type: 'text' as const, text: 'Start implementing now' }] }
+      await collect(adapter.stream({ ...options('session-followup'), messages: [first, next, time] }))
+      expect(methods.startThread).toHaveBeenCalledOnce()
+      expect(methods.startTurn.mock.calls[1]?.[0].input).toEqual([
+        { type: 'text', text: 'Time sampled for the follow-up' },
+        { type: 'text', text: 'Start implementing now' },
+      ])
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('instructs Codex to attempt run_code before claiming project tools failed', async () => {
+    const cwd = 'F:\\dsh\\projects\\dsh-work'
+    const { adapter, methods } = createFakeClient(() => cwd)
+    try {
+      const runCode = { name: 'run_code', description: 'Run DSH tool code', parameters: { type: 'object', properties: { code: { type: 'string' } } } }
+      await collect(adapter.stream({ ...options('session-code'), tools: [runCode] }))
+      expect(methods.startThread).toHaveBeenCalledWith(expect.objectContaining({
+        cwd,
+        dynamicTools: [expect.objectContaining({ name: 'run_code' })],
+        developerInstructions: expect.stringContaining(`The current Codex thread working directory is ${JSON.stringify(cwd)}`),
+      }), expect.any(Object))
+      expect(methods.startThread).toHaveBeenCalledWith(expect.objectContaining({
+        developerInstructions: expect.stringContaining('Do not claim that a write or approval failed unless the tool actually returned that failure.'),
+      }), expect.any(Object))
+    } finally {
+      await adapter.close()
+    }
+  })
+
+  it('rejects a resumed thread with a different identity instead of losing the original task', async () => {
+    const original = createFakeClient()
+    const chunks = await collect(original.adapter.stream(options('session-mismatch')))
+    await original.adapter.close()
+    const finish = chunks.find((chunk) => chunk.type === 'finish')
+    const restored = createFakeClient()
+    try {
+      restored.methods.resumeThread.mockResolvedValueOnce({ id: 'another-thread' })
+      const assistant = { id: MessageId('assistant-mismatch'), role: 'assistant' as const,
+        source: { kind: 'model' as const, provider: CODEX_PROVIDER, model: MODEL.model, replayState: finish?.type === 'finish' ? finish.replayState : undefined },
+        content: [{ type: 'text' as const, text: 'previous task' }] }
+      await expect(collect(restored.adapter.stream({ ...options('session-mismatch'), messages: [
+        ...options('session-mismatch').messages,
+        assistant,
+        { id: MessageId('followup-mismatch'), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'continue' }] },
+      ] }))).rejects.toMatchObject({ failure: { code: 'SESSION_THREAD_MISMATCH' } })
+      expect(restored.methods.startTurn).not.toHaveBeenCalled()
+    } finally {
+      await restored.adapter.close()
     }
   })
 

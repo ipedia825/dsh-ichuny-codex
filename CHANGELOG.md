@@ -4,7 +4,7 @@ All notable changes from 2026-11-14 onward are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.7.15] - 2026-11-22
 
 ### Changed
 
@@ -14,6 +14,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Thi
 
 ### Fixed
 
+- Ground Codex `run_code` instructions in the effective session thread directory and require an actual tool failure before claiming that a workspace is unwritable.
+- Isolate DSH compaction and other auxiliary-purpose model calls from the main Codex thread, preventing compaction from consuming pending tool results and triggering a follow-on `EMPTY_INPUT` failure.
+- Use each DSH session's effective working directory for Codex threads by default, including later working-directory changes; explicit `cwd` configuration still overrides it.
+- Keep DSH time/skill/runtime context before the latest human task in Codex input, and remind Codex to try the exposed `run_code` tool before claiming tool failures.
+- Reject a resumed Codex thread with a different ID instead of silently losing the prior task context.
 - Keep a failed Codex turn's user input eligible for retry; the cursor advances only after successful completion.
 - Allow tool-catalog or system-instructions updates without a new user message to continue with a bounded instruction, while preserving rejection of truly duplicate empty requests.
 
