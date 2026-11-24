@@ -4,3 +4,5 @@
 - insert:
     - id: llm-codex
       name: '@ipedia/dsh-ichuny-codex'
+    - id: dsh-ichuny-codex-oauth-controller
+      name: '@ipedia/dsh-ichuny-codex/oauth-controller'

@@ -2,10 +2,10 @@
 title: "dsh-ichuny-codex Common Issues"
 category: troubleshooting
 service: dsh-ichuny-codex
-version: "1.7.14"
+version: "1.8.0"
 tags: [troubleshooting, codex, authentication, dsh, tools, attachments]
 created: "2026-08-26"
-last_updated: "2026-11-16"
+last_updated: "2026-11-24"
 description: "Diagnoses current installation, authentication, model, attachment, tool and quota failures."
 ---
 
@@ -25,7 +25,7 @@ The adapter requires an authenticated `chatgpt` account and returns `AUTH` other
 
 ## Model list is empty or provider is missing
 
-Confirm the patch loads `llm-codex`, the adapter registers `my-codex`, and the host has a compatible DSH `llm` service. The ordinary model listing filters hidden models and requires a valid ChatGPT login; inspect sanitized app-server validation errors when `model/list` fails. Do not look for provider `codex`, which is not the ID registered by this build. [PATH: cordis.patch.yml] [PATH: src/index.ts] [PATH: src/adapter.ts]
+Confirm DSH rc.5, that the patch loads `llm-codex` and the OAuth controller, and that the Host supplies `llm`, `credentials` and `authorization`. Providers are `my-codex` and `my-codex-oauth`, not `codex`; the local catalog needs Codex CLI login, while OAuth needs its own SIWC connection in Settings. Model listing filters hidden models; inspect sanitized app-server errors when `model/list` fails. [PATH: cordis.patch.yml] [PATH: src/index.ts] [PATH: src/adapter.ts]
 
 ## Images or files fail
 
@@ -47,6 +47,6 @@ If compaction starts while a Codex tool call is pending, the auxiliary summariza
 
 ## Quota display is absent
 
-The Web client shows the quota control only while a model from `my-codex` is selected and the optional web-server route returns an available snapshot. Check `/api/dsh-ichuny-codex/rate-limits` through the host and ensure the client plugin was loaded after restarting the DSH profile. Error messages are redacted for credential-like values but the route relies on the host for access control. [PATH: client.js] [PATH: src/index.ts]
+The Web client shows quota percentages only when a model from `my-codex` is selected and the optional web-server route returns an available snapshot. The OAuth Preview flow has no official remaining-quota summary API; open ChatGPT Usage from the OAuth settings tab rather than displaying local quota for it. Check `/api/dsh-ichuny-codex/rate-limits` through the host and ensure the client plugin was loaded after restarting the DSH profile. Error messages are redacted for credential-like values but the route relies on the host for access control. [PATH: client.js] [PATH: src/index.ts]
 
 See [architecture](../reference/architecture.md), [configuration](../reference/configuration.md) and [security](../reference/security.md).

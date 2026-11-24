@@ -29,12 +29,12 @@ npm run package:check
 
 ## Architecture boundaries
 
-- Codex owns authentication, token refresh, credential storage, and account state.
-- Never inspect, copy, log, or modify Codex auth files or token values.
-- Never implement custom OAuth or add an OpenAI API-key fallback.
-- Never call the OpenAI Responses API or another OpenAI HTTP endpoint directly.
-- Communicate with `codex app-server` only through validated JSON-RPC on stdio.
-- Spawn the app server directly. Shell commands and `shell: true` are forbidden.
+- The local `my-codex` provider keeps Codex-owned authentication, token refresh, credential storage, and account state. Never inspect, copy, log, or modify Codex auth files or token values.
+- The only plugin-owned OAuth exception is OpenAI's official Sign in with ChatGPT open-source flow documented at `developers.openai.com/siwc/`: dynamic client registration, PKCE/OIDC, the exact documented scopes (`openid profile email offline_access resource.invoke chatgpt.tokens.use.direct`), `auth.openai.com` authorization/token/JWKS/revocation endpoints, and the public `api.openai.com/v1/models` and `api.openai.com/v1/responses` endpoints.
+- The OAuth exception must run as independent provider `my-codex-oauth` through a separately configured `codex app-server`; its credentials, process, replay state, pending tools, cancellation and lifecycle must remain isolated from `my-codex`.
+- Never use ChatGPT private `backend-api` endpoints, a copied/fixed third-party client ID, undocumented scopes or endpoints, or an OpenAI API-key fallback. Never place SIWC tokens in ordinary config, browser storage, URLs, logs, errors, test output, or Codex auth storage.
+- Except for the narrow SIWC flow above, communicate with `codex app-server` only through validated JSON-RPC on stdio.
+- Spawn every app server directly. Shell commands and `shell: true` are forbidden.
 - Redact credential-like values from errors, logs, test output, and tool results.
 - Do not add telemetry, analytics, crash reporting, or remote logging.
 - DSH and Cordis extension seams remain peer dependencies.

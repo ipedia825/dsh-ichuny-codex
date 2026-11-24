@@ -25,7 +25,12 @@ import type { CodexModel, CodexTokenUsageBreakdown, CodexUserInput, Experimental
 
 export const CODEX_PROVIDER = 'my-codex'
 
-type Notification = Parameters<Parameters<AppServerClient['onNotification']>[0]>[0]
+export type CodexAppServer = Pick<AppServerClient,
+  'registerServerRequestHandler' | 'listModels' | 'startThread' | 'resumeThread' | 'onNotification'
+  | 'startTurn' | 'readRateLimits' | 'close' | 'readAccount' | 'interruptTurn'>
+  & { readonly onClose?: AppServerClient['onClose'] }
+
+type Notification = Parameters<Parameters<CodexAppServer['onNotification']>[0]>[0]
 
 type PendingToolCall = {
   readonly callId: string
@@ -48,6 +53,9 @@ type ThreadState = {
   wake: (() => void) | undefined
   unsubscribe: (() => void) | undefined
   turnId: string | undefined
+  generation: number | undefined
+  registration: string | undefined
+  terminal: Error | undefined
   lastUserMessageId: string | undefined
   pendingUserMessageId: string | undefined
 }
@@ -68,23 +76,36 @@ function codexError(message: string, code: string): LlmError {
 }
 
 export interface CodexAdapterOptions {
-  readonly client: AppServerClient
+  readonly client: CodexAppServer
   readonly cwd: string
   readonly sandbox: 'read-only' | 'workspace-write' | 'danger-full-access'
   readonly approvalPolicy: 'never' | 'on-request' | 'untrusted'
   readonly requestTimeoutMs: number
   readonly sessionCwd?: (sessionId: GenerateOptions['sessionId']) => string | undefined
   readonly attachments?: () => AttachmentStore | undefined
+  readonly providerId?: string
+  readonly providerName?: string
+  readonly replayVersion?: 1 | 2
+  readonly registrationId?: () => string | undefined
+  readonly contextGeneration?: () => number
+  readonly requireReady?: (signal?: AbortSignal, allowRefresh?: boolean) => Promise<void>
 }
 
 export class CodexAdapter extends LlmAdapter {
-  private readonly client: AppServerClient
+  private readonly client: CodexAppServer
   private readonly cwd: string
   private readonly sessionCwd: ((sessionId: GenerateOptions['sessionId']) => string | undefined) | undefined
   private readonly sandbox: CodexAdapterOptions['sandbox']
   private readonly approvalPolicy: CodexAdapterOptions['approvalPolicy']
   private readonly requestTimeoutMs: number
   private readonly attachments: (() => AttachmentStore | undefined) | undefined
+  private readonly providerId: string
+  private readonly providerName: string
+  private readonly replayVersion: 1 | 2
+  private readonly registrationId: (() => string | undefined) | undefined
+  private readonly contextGeneration: (() => number) | undefined
+  private readonly unregisterClose: (() => void) | undefined
+  private readonly ready: ((signal?: AbortSignal, allowRefresh?: boolean) => Promise<void>) | undefined
   private readonly threads = new Map<string, ThreadState>()
   private readonly unregisterServerRequestHandler: () => void
 
@@ -97,6 +118,24 @@ export class CodexAdapter extends LlmAdapter {
     this.approvalPolicy = options.approvalPolicy
     this.requestTimeoutMs = options.requestTimeoutMs
     this.attachments = options.attachments
+    this.providerId = options.providerId ?? CODEX_PROVIDER
+    this.providerName = options.providerName ?? 'ChatGPT（本地）'
+    this.replayVersion = options.replayVersion ?? 1
+    this.registrationId = options.registrationId
+    this.contextGeneration = options.contextGeneration
+    this.ready = options.requireReady
+    this.unregisterClose = this.client.onClose?.(error => {
+      for (const state of this.threads.values()) {
+        state.terminal = codexError(safeErrorMessage(error), 'CODEX_APP_SERVER')
+        for (const pending of state.pendingCalls.values()) pending.reject(state.terminal)
+        state.pendingCalls.clear()
+        state.turnId = undefined
+        state.pendingUserMessageId = undefined
+        state.wake?.()
+        state.wake = undefined
+      }
+    })
+    if (this.replayVersion === 2 && this.registrationId === undefined) throw new TypeError('replay v2 requires registrationId')
     this.unregisterServerRequestHandler = this.client.registerServerRequestHandler(
       (request, signal) => this.handleServerRequest(request, signal),
     )
@@ -104,7 +143,7 @@ export class CodexAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): LlmProviderInfo {
     this.assertProvider(provider)
-    return { id: CODEX_PROVIDER, name: 'My Codex' }
+    return { id: this.providerId, name: this.providerName }
   }
 
   override providerRetryPolicy(provider: string): ResolvedRetryPolicy | undefined {
@@ -114,7 +153,7 @@ export class CodexAdapter extends LlmAdapter {
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     this.assertProvider(provider)
-    await this.requireLogin()
+    await this.requireReady()
     const models = await this.client.listModels({ includeHidden: false })
     return models.filter((model) => !model.hidden).map((model) => this.modelInfo(model))
   }
@@ -125,7 +164,7 @@ export class CodexAdapter extends LlmAdapter {
     signal?: AbortSignal,
   ): Promise<LlmResolvedModelInfo> {
     this.assertProvider(provider)
-    await this.requireLogin(signal)
+    await this.requireReady(signal)
     const models = await this.client.listModels({
       includeHidden: true,
       ...requestOptions(signal),
@@ -151,9 +190,22 @@ export class CodexAdapter extends LlmAdapter {
     const auxiliary = options.purpose !== undefined
     const key = auxiliary || options.sessionId === undefined ? `ephemeral:${randomUUID()}` : String(options.sessionId)
     let state = this.threads.get(key)
-    const replay = state === undefined && !auxiliary && options.sessionId !== undefined ? replayCandidate(options.messages) : undefined
     const pendingTools = (state?.pendingCalls.size ?? 0) > 0
-    const freshMessages = pendingTools ? [] : auxiliary ? options.messages : newUserMessages(options.messages, state?.lastUserMessageId ?? replay?.lastUserMessageId)
+    if (this.replayVersion === 2) await this.requireReady(options.signal, !pendingTools && state?.turnId === undefined)
+    const registrationId = this.registrationId?.()
+    if (this.replayVersion === 2 && registrationId === undefined) throw new LlmError('ChatGPT OAuth connection is required', 'AUTH')
+    const generation = this.contextGeneration?.()
+    if (state !== undefined && this.replayVersion === 2 && state.registration !== registrationId) {
+      throw codexError('OAuth session belongs to a different ChatGPT account', 'SESSION_ACCOUNT_CHANGED')
+    }
+    if (state !== undefined && state.generation !== generation && (pendingTools || state.turnId !== undefined)) {
+      throw codexError('OAuth app-server changed during an active turn', 'SESSION_INTERRUPTED')
+    }
+    if (state === undefined && this.replayVersion === 2 && hasDifferentRegistrationReplay(options.messages, this.providerId, registrationId)) {
+      throw codexError('OAuth session belongs to a different ChatGPT account', 'SESSION_ACCOUNT_CHANGED')
+    }
+    const replay = state === undefined && !auxiliary && options.sessionId !== undefined ? replayCandidate(options.messages, this.providerId, this.replayVersion, registrationId) : undefined
+    const freshMessages = pendingTools ? [] : auxiliary ? options.messages : newUserMessages(options.messages, state?.lastUserMessageId ?? replay?.lastUserMessageId, this.providerId)
     const input = pendingTools ? [] : auxiliary ? await this.buildAuxiliaryInput(freshMessages, options.signal) : await this.buildUserInput(freshMessages, options.signal)
     const baseInstructions = systemInstructions(options)
     const cwd = this.sessionCwd?.(options.sessionId) ?? this.cwd
@@ -163,7 +215,7 @@ export class CodexAdapter extends LlmAdapter {
       || cwd !== state.cwd
     )
     if (input.length === 0 && !pendingTools && !updatedContext) throw codexError('Codex request has no new user content', 'EMPTY_INPUT')
-    await this.requireLogin(options.signal)
+    if (this.replayVersion === 1) await this.requireReady(options.signal)
 
     if ((options.tools?.length ?? 0) > 0 && options.sessionId === undefined && !auxiliary) {
       throw codexError('Dynamic tools require a persistent DSH session id', 'DYNAMIC_TOOLS_REQUIRE_SESSION')
@@ -195,6 +247,9 @@ export class CodexAdapter extends LlmAdapter {
         wake: undefined,
         unsubscribe: undefined,
         turnId: undefined,
+        generation,
+        registration: registrationId,
+        terminal: undefined,
         lastUserMessageId: replay?.lastUserMessageId,
         pendingUserMessageId: undefined,
       }
@@ -202,7 +257,7 @@ export class CodexAdapter extends LlmAdapter {
     } else if (state.pendingCalls.size === 0) {
       const toolSpecs = buildToolSpecs(options.tools ?? [])
       const fingerprint = toolCatalogFingerprint(toolSpecs)
-      if (fingerprint !== state.catalogFingerprint || baseInstructions !== state.baseInstructions || cwd !== state.cwd) {
+      if (state.generation !== generation || fingerprint !== state.catalogFingerprint || baseInstructions !== state.baseInstructions || cwd !== state.cwd) {
         if (state.turnId !== undefined) {
           throw codexError('Codex turn has not completed; cannot replace thread context', 'SESSION_BUSY')
         }
@@ -220,6 +275,9 @@ export class CodexAdapter extends LlmAdapter {
         state.toolNames = new Set(toolSpecs.map((tool) => tool.name))
         state.catalogFingerprint = fingerprint
         state.baseInstructions = baseInstructions
+        state.generation = generation
+        state.queue.length = 0
+        state.terminal = undefined
       }
     }
 
@@ -273,7 +331,7 @@ export class CodexAdapter extends LlmAdapter {
       const blocks = new Map<number, { readonly kind: 'text' | 'reasoning'; text: string }>()
       let usage: CodexTokenUsageBreakdown | undefined
       while (true) {
-        const notification = await nextNotification(queue, notify)
+        const notification = await nextNotification(queue, notify, () => activeState.terminal)
         if (notification.method === 'dsh/dynamic-tool-call') {
           const calls = [...activeState.pendingCalls.values()].filter((call) => !call.exposed && !call.responded)
           if (calls.length === 0) continue
@@ -321,7 +379,8 @@ export class CodexAdapter extends LlmAdapter {
             type: 'finish',
             reason: { kind: 'stop' },
             ...(options.sessionId === undefined || auxiliary ? {} : { replayState: { response: {
-              version: 1, threadId: activeState.threadId,
+              version: this.replayVersion, threadId: activeState.threadId,
+              ...(registrationId === undefined ? {} : { registrationId }),
               lastUserMessageId: activeState.lastUserMessageId ?? null,
             } } }),
           }
@@ -390,13 +449,20 @@ export class CodexAdapter extends LlmAdapter {
     return input
   }
   async readRateLimits(signal?: AbortSignal): Promise<JsonObject> {
-    await this.requireLogin(signal)
+    await this.requireReady(signal)
     return this.client.readRateLimits({ ...requestOptions(signal), timeoutMs: this.requestTimeoutMs })
   }
+  hasActiveTurns(): boolean {
+    return [...this.threads.values()].some(state => state.turnId !== undefined || state.pendingCalls.size > 0)
+  }
+
   async close(): Promise<void> {
     this.unregisterServerRequestHandler()
+    this.unregisterClose?.()
     for (const state of this.threads.values()) {
       for (const pending of state.pendingCalls.values()) pending.reject(codexError('Codex adapter closed', 'ADAPTER_CLOSED'))
+      state.terminal = codexError('Codex adapter closed', 'ADAPTER_CLOSED')
+      state.wake?.()
       state.unsubscribe?.()
     }
     this.threads.clear()
@@ -437,14 +503,15 @@ export class CodexAdapter extends LlmAdapter {
       state.wake = undefined
     })
   }
-  private async requireLogin(signal?: AbortSignal): Promise<void> {
+  private async requireReady(signal?: AbortSignal, allowRefresh = true): Promise<void> {
+    if (this.ready !== undefined) { await this.ready(signal, allowRefresh); return }
     const account = await this.client.readAccount({ ...requestOptions(signal), timeoutMs: this.requestTimeoutMs })
     if (!account.authenticated || account.kind !== 'chatgpt') throw new LlmError('Codex ChatGPT login is required', 'AUTH')
   }
 
   private modelInfo(model: CodexModel): LlmModelInfo {
     return {
-      provider: CODEX_PROVIDER,
+      provider: this.providerId,
       id: model.model,
       name: model.displayName,
       description: model.description,
@@ -453,7 +520,7 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   private assertProvider(provider: string): void {
-    if (provider !== CODEX_PROVIDER) throw codexError(`Unknown provider: ${provider}`, 'INVALID_PROVIDER')
+    if (provider !== this.providerId) throw codexError(`Unknown provider: ${provider}`, 'INVALID_PROVIDER')
   }
 
   private async interrupt(threadId: string, turnId: string): Promise<void> {
@@ -553,15 +620,33 @@ function systemInstructions(options: GenerateOptions<string>): string {
     .map((block) => block.text).join('\n\n')
 }
 
-function replayCandidate(messages: readonly RequestMessage[]): { readonly threadId: string; readonly lastUserMessageId?: string } | undefined {
+function hasDifferentRegistrationReplay(messages: readonly RequestMessage[], providerId: string, registrationId: string | undefined): boolean {
+  return messages.some(message => {
+    if (message.role !== 'assistant' || message.source.provider !== providerId) return false
+    const envelope = message.source.replayState
+    if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) return false
+    const response = 'response' in envelope ? envelope.response : undefined
+    return response !== null && typeof response === 'object' && !Array.isArray(response)
+      && 'version' in response && response.version === 2
+      && 'registrationId' in response && response.registrationId !== registrationId
+  })
+}
+
+function replayCandidate(
+  messages: readonly RequestMessage[],
+  providerId: string,
+  replayVersion: 1 | 2,
+  registrationId: string | undefined,
+): { readonly threadId: string; readonly lastUserMessageId?: string } | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
-    if (message?.role !== 'assistant' || message.source.provider !== CODEX_PROVIDER) continue
+    if (message?.role !== 'assistant' || message.source.provider !== providerId) continue
     const envelope = message.source.replayState
     if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) return undefined
     const response = 'response' in envelope ? envelope.response : undefined
     if (response === null || typeof response !== 'object' || Array.isArray(response)) return undefined
-    if (!('version' in response) || response.version !== 1 || !('threadId' in response) || typeof response.threadId !== 'string' || response.threadId.length === 0) return undefined
+    if (!('version' in response) || response.version !== replayVersion || !('threadId' in response) || typeof response.threadId !== 'string' || response.threadId.length === 0) return undefined
+    if (replayVersion === 2 && (!('registrationId' in response) || response.registrationId !== registrationId)) return undefined
     const cursor = 'lastUserMessageId' in response ? response.lastUserMessageId : undefined
     if (cursor !== undefined && cursor !== null && (typeof cursor !== 'string' || cursor.length === 0)) return undefined
     return { threadId: response.threadId, ...(typeof cursor === 'string' ? { lastUserMessageId: cursor } : {}) }
@@ -569,14 +654,14 @@ function replayCandidate(messages: readonly RequestMessage[]): { readonly thread
   return undefined
 }
 
-function newUserMessages(messages: readonly RequestMessage[], cursor: string | undefined): RequestMessage[] {
+function newUserMessages(messages: readonly RequestMessage[], cursor: string | undefined, providerId: string): RequestMessage[] {
   let from = 0
   if (cursor !== undefined) {
     const index = messages.findIndex((message) => message.role === 'user' && message.id === cursor)
     if (index >= 0) {
       from = index + 1
     } else {
-      const lastAnswered = messages.findLastIndex((message) => message.role === 'assistant' && message.source.provider === CODEX_PROVIDER)
+      const lastAnswered = messages.findLastIndex((message) => message.role === 'assistant' && message.source.provider === providerId)
       if (lastAnswered < 0) throw codexError('Codex input cursor is missing after history compaction', 'SESSION_CURSOR_MISSING')
       from = lastAnswered + 1
     }
@@ -589,8 +674,10 @@ function requestOptions(signal: AbortSignal | undefined): { readonly signal?: Ab
 }
 
 
-async function nextNotification(queue: Notification[], wait: () => Promise<void>): Promise<Notification> {
-  while (queue.length === 0) await wait()
+async function nextNotification(queue: Notification[], wait: () => Promise<void>, failure: () => Error | undefined): Promise<Notification> {
+  while (queue.length === 0 && failure() === undefined) await wait()
+  const terminal = failure()
+  if (terminal !== undefined) throw terminal
   return queue.shift() as Notification
 }
 

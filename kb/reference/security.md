@@ -2,10 +2,10 @@
 title: "dsh-ichuny-codex Security Model"
 category: reference
 service: dsh-ichuny-codex
-version: "1.7.14"
+version: "1.8.0"
 tags: [security, credentials, subprocess, json-rpc, tools]
 created: "2026-08-26"
-last_updated: "2026-11-16"
+last_updated: "2026-11-24"
 description: "Defines the actual credential, process, tool and quota-route trust boundaries."
 ---
 
@@ -13,7 +13,7 @@ description: "Defines the actual credential, process, tool and quota-route trust
 
 ## Credentials and process
 
-Codex owns login, token refresh, credential storage and its built-in tools. The adapter asks `account/read` for status and requires authenticated `chatgpt` mode; it neither reads Codex credential files nor implements OAuth or an API-key fallback. The pinned native Codex executable starts directly, with fixed `app-server --listen stdio://` arguments, `shell: false`, and the explicit environment allowlist in `src/index.ts`. [PATH: src/adapter.ts] [PATH: src/codex-command.ts] [PATH: src/app-server/transport.ts] [PATH: src/index.ts]
+For the implemented local `my-codex` provider, Codex owns login, token refresh, credential storage and its built-in tools. The adapter asks `account/read` for status and requires authenticated `chatgpt` mode; it never reads Codex credential files and has no API-key fallback. The pinned native Codex executable starts directly, with fixed `app-server --listen stdio://` arguments, `shell: false`, and the explicit environment allowlist in `src/index.ts`. [PATH: src/adapter.ts] [PATH: src/codex-command.ts] [PATH: src/app-server/transport.ts] [PATH: src/index.ts]
 
 Only `APPDATA`, `CODEX_HOME`, `HOME`, `HOMEDRIVE`, `HOMEPATH`, `LOCALAPPDATA`, `PATH`, `PATHEXT`, `SYSTEMROOT`, `TEMP`, `TMP`, `USERPROFILE`, `WINDIR`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, and `LC_*` pass to the child. Do not assume arbitrary project, cloud, certificate or telemetry variables propagate. [PATH: src/index.ts]
 
@@ -34,5 +34,11 @@ The optional Web route exposes only selected quota fields on successful requests
 ## Verification limits
 
 The default Vitest configuration selects every remaining spec file in `tests/`, including adapter, dynamic-tool, Cordis composition and app-server protocol coverage. Build and package checks do not prove live DSH composition, approval behavior or authenticated Codex turns. Run a real-client smoke test before making an end-to-end release claim. [PATH: vitest.config.ts] [PATH: package.json]
+
+## Approved OAuth boundary
+
+The repository permits one narrow plugin-owned OAuth path: OpenAI's official Sign in with ChatGPT open-source Preview, limited to one trusted local OS user and independent provider `my-codex-oauth` running through a separately configured Codex app-server. Allowed network surfaces are the documented `auth.openai.com` authorization, token, JWKS and revocation endpoints plus public `api.openai.com/v1/models` and `/v1/responses`; allowed scopes are `openid profile email offline_access resource.invoke chatgpt.tokens.use.direct`. Dynamic client registration, PKCE, OIDC validation, exact loopback redirects, DSH credential records, serialized rotating-token refresh and remote revocation are required. The local credential provider enforces owner-only POSIX modes and atomic replacement; on Windows it does not verify equivalent ACL ownership, so the supported deployment remains one trusted local OS user.
+
+Private ChatGPT `backend-api` endpoints, copied/fixed third-party client IDs, undocumented scopes/endpoints, API-key fallback, credential logging, browser/config token storage and cross-provider fallback remain prohibited. OAuth credentials, process lifecycle, replay state, pending tools and cancellation must not mix with `my-codex`. Before launch, the OAuth runtime creates and verifies its dedicated `CODEX_HOME` directory; it rejects a non-directory or symbolic-link target. No Codex auth files are copied into that home. The protocol foundation, DSH authorization flow and credential lifecycle are implemented, and the settings Client uses an authenticated Typert controller for connect/status/cancel/disconnect; `my-codex-oauth` is registered with an isolated app-server runtime and replay v2 binding. Returning OAuth login requires the same verified subject. Revocation replaces tokens with a non-secret marker, so a concurrent new authorization cannot be erased by a later delete. Disconnect closes the OAuth child before revocation; child generation changes require same-account thread resume, and transport closure wakes pending turns. A real-account text turn was reported by the user, while image/tool/cancellation/refresh/disconnect live checks remain unverified. [PATH: kb/reference/chatgpt-connection-decision.md] [PATH: CHATGPT_CONNECTION_DESIGN.md]
 
 See [architecture](architecture.md), [protocol](app-server-protocol.md) and [configuration](configuration.md).

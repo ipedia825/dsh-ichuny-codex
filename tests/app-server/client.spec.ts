@@ -82,6 +82,18 @@ describe('AppServerClient', () => {
     await client.close()
   })
 
+  it('notifies close subscribers once when the transport exits', async () => {
+    const transport = new FakeTransport()
+    const client = await startClient(transport)
+    const onClose = vi.fn()
+    client.onClose(onClose)
+    transport.emitClose(new Error('synthetic transport exit'))
+    expect(onClose).toHaveBeenCalledWith(expect.objectContaining({ message: 'synthetic transport exit' }))
+    expect(onClose).toHaveBeenCalledOnce()
+    await client.close()
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
   it('opts into the experimental app-server API only when explicitly enabled', async () => {
     const transport = new FakeTransport()
     const options = { experimentalApi: true } as ConstructorParameters<

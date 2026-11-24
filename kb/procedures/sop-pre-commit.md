@@ -2,10 +2,10 @@
 title: "SOP: Local Development Verification"
 category: procedures
 service: dsh-ichuny-codex
-version: "1.7.7"
+version: "1.8.0"
 tags: [sop, pre-commit, testing, security, packaging]
 created: "2026-08-26"
-last_updated: "2026-11-16"
+last_updated: "2026-11-24"
 description: "Checks the current source, selected tests, KB, security scan and local npm artifact before changes are shared."
 ---
 
@@ -33,6 +33,6 @@ npm run package:check
 
 Review `npm pack --dry-run --ignore-scripts` for `lib/`, `client.js`, `cordis.patch.yml`, README, CHANGELOG, LICENSE and NOTICE, and ensure source, tests, KB and credentials do not ship. Audit and dependency/signature checks are separate supply-chain gates; they may require registry access. Do not commit or publish an artifact with known failing required gates. [PATH: package.json] [PATH: .npmignore]
 
-For protocol or configuration changes, update unit and integration tests and the relevant KB references together. The current adapter uses provider `my-codex`, an experimental app-server connection and in-memory thread state. Do not restore claims from the superseded decision records without source and real-client verification. [PATH: src/index.ts] [PATH: src/adapter.ts]
+For protocol or configuration changes, update unit and integration tests and the relevant KB references together. The current adapters register `my-codex` and `my-codex-oauth`, with separate app-server processes and account-bound replay state. Do not restore claims from the superseded decision records without source and real-client verification. [PATH: src/index.ts] [PATH: src/adapter.ts]
 
 See [source setup](../howto/setup.md), [architecture](../reference/architecture.md) and [release readiness](sop-release.md).

@@ -13,11 +13,12 @@ const REQUEST_TIMEOUT_MS = 120_000
 const EXPECTED_TEXT = 'DSH CODEX SMOKE OK'
 
 const cwd = process.cwd()
+const command = process.env['CODEX_SMOKE_COMMAND'] ?? bundledCodexCommand()
 const client = new AppServerClient({
   experimentalApi: true,
   requestTimeoutMs: REQUEST_TIMEOUT_MS,
   transport: new ChildProcessTransport({
-    command: bundledCodexCommand(),
+    command,
     cwd,
     env: childEnvironment(process.env),
   }),

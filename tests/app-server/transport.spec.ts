@@ -4,6 +4,8 @@ import type { ChildProcessWithoutNullStreams, SpawnOptions } from 'node:child_pr
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ChildProcessTransport } from '../../src/app-server/transport.js'
+import { OAUTH_APP_SERVER_ARGS, oauthChildEnvironment } from '../../src/siwc/app-server.js'
+import type { SiwcGrant } from '../../src/siwc/grant.js'
 
 interface FakeChildOptions {
   readonly backpressure?: boolean
@@ -41,6 +43,8 @@ function createHarness(options: FakeChildOptions & {
   readonly maxLineBytes?: number
   readonly maxStderrBytes?: number
   readonly shutdownTimeoutMs?: number
+  readonly args?: readonly string[]
+  readonly env?: Readonly<NodeJS.ProcessEnv>
 } = {}) {
   const child = createFakeChild(options)
   const spawnFactory = vi.fn((_command: string, _args: string[], _spawn: SpawnOptions) => child.child)
@@ -49,7 +53,8 @@ function createHarness(options: FakeChildOptions & {
   const transport = new ChildProcessTransport({
     command: '/opt/bin/codex',
     cwd: '/workspace',
-    env: { PATH: '/opt/bin', CODEX_HOME: '/safe/home' },
+    env: options.env ?? { PATH: '/opt/bin', CODEX_HOME: '/safe/home' },
+    ...(options.args === undefined ? {} : { args: options.args }),
     maxLineBytes: options.maxLineBytes ?? 1_024,
     maxStderrBytes: options.maxStderrBytes ?? 128,
     shutdownTimeoutMs: options.shutdownTimeoutMs ?? 20,
@@ -79,6 +84,25 @@ describe('ChildProcessTransport', () => {
         windowsHide: true,
       },
     )
+  })
+
+  it('keeps OAuth token only in the isolated child environment and fixed official argv', async () => {
+    const grant: SiwcGrant = {
+      schemaVersion: 1, state: 'active', hostId: 'urn:uuid:host', clientId: 'client',
+      accessToken: 'oauth-access-token', refreshToken: 'refresh', expiresAt: 1_800_000_000_000,
+      scopes: ['openid', 'profile', 'email', 'offline_access', 'resource.invoke', 'chatgpt.tokens.use.direct'],
+      identity: { subject: 'subject' },
+    }
+    const env = oauthChildEnvironment({ PATH: '/opt/bin', CODEX_HOME: '/local-codex', OPENAI_API_KEY: 'forbidden' }, grant)
+    const harness = createHarness({ args: OAUTH_APP_SERVER_ARGS, env })
+    await harness.transport.start({ onLine: harness.onLine, onClose: harness.onClose })
+
+    const [, args, options] = harness.spawnFactory.mock.calls[0] ?? []
+    expect(args).toEqual(OAUTH_APP_SERVER_ARGS)
+    expect(args).not.toContain('oauth-access-token')
+    expect(options).toMatchObject({ shell: false, env: expect.objectContaining({ ACCESS_TOKEN: 'oauth-access-token' }) })
+    expect((options?.env as NodeJS.ProcessEnv | undefined)?.['OPENAI_API_KEY']).toBeUndefined()
+    expect((options?.env as NodeJS.ProcessEnv | undefined)?.['CODEX_HOME']).not.toBe('/local-codex')
   })
 
   it('frames split and coalesced JSONL messages in order', async () => {

@@ -84,7 +84,7 @@ describe('current Codex adapter', () => {
   it('requires ChatGPT login and rejects a different provider', async () => {
     const { adapter, methods } = createFakeClient()
     try {
-      expect(adapter.providerInfo(CODEX_PROVIDER)).toEqual({ id: CODEX_PROVIDER, name: 'My Codex' })
+      expect(adapter.providerInfo(CODEX_PROVIDER)).toEqual({ id: CODEX_PROVIDER, name: 'ChatGPT（本地）' })
       expect(() => adapter.providerInfo('codex')).toThrow('Unknown provider')
       methods.readAccount.mockResolvedValueOnce({ authenticated: false, kind: 'chatgpt', requiresOpenaiAuth: true })
       await expect(adapter.listModels(CODEX_PROVIDER)).rejects.toMatchObject({ failure: { code: 'AUTH' } })

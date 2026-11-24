@@ -3,10 +3,14 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { Context } from '@deepseek-ai/cordis'
+import AuthorizationService from '@deepseek-ai/dsh-authorization'
+import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import type { CredentialInfo, CredentialKey, CredentialRecord, CredentialRecordEntry, CredentialRecordInfo, CredentialRef } from '@deepseek-ai/dsh-credentials'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
 
 import { CODEX_PROVIDER, CodexAdapter } from '../src/adapter.js'
+import { AppServerClient } from '../src/app-server/client.js'
 import { bundledCodexCommand } from '../src/codex-command.js'
 import {
   apply,
@@ -15,17 +19,52 @@ import {
   resolveConfig,
 } from '../src/index.js'
 import * as DshCodexPlugin from '../src/index.js'
+import SiwcRemoteController from '../src/oauth-controller.js'
+import { CODEX_OAUTH_PROVIDER, OAuthCodexAdapter } from '../src/oauth-adapter.js'
+import { TYPERT } from '../src/typert.js'
+
+class TestCredentialProvider extends CredentialProvider {
+  private readonly records = new Map<CredentialKey, CredentialRecord>()
+
+  async resolve(_ref: CredentialRef): Promise<undefined> { return undefined }
+  async describe(_ref: CredentialRef): Promise<CredentialInfo> { return { configured: false, writable: true } }
+  async set(_ref: CredentialRef, _value: string): Promise<void> {}
+  async unset(_ref: CredentialRef): Promise<void> {}
+  async readRecord(key: CredentialKey): Promise<CredentialRecord | undefined> { return this.records.get(key) }
+  async describeRecord(key: CredentialKey): Promise<CredentialRecordInfo> {
+    const record = this.records.get(key)
+    return { configured: record !== undefined, ...(record === undefined ? {} : { kind: record.kind }), writable: true }
+  }
+  async listRecords(): Promise<readonly CredentialRecordEntry[]> {
+    return [...this.records].map(([key, record]) => ({ key, kind: record.kind }))
+  }
+  async modifyRecord(key: CredentialKey, mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>): Promise<CredentialRecord | undefined> {
+    const current = this.records.get(key)
+    const next = await mutate(current)
+    if (next !== undefined) { this.records.set(key, next); this.notifyRecordUpdated(key); return next }
+    return current
+  }
+  async deleteRecord(key: CredentialKey): Promise<void> { this.records.delete(key); this.notifyRecordUpdated(key) }
+}
 
 interface TestContext {
   readonly llm: { readonly registerAdapter: ReturnType<typeof vi.fn> }
+  readonly authorization: { readonly registerFlow: ReturnType<typeof vi.fn> }
+  readonly credentials: { readonly readRecord: ReturnType<typeof vi.fn> }
   readonly inject: ReturnType<typeof vi.fn>
   readonly effect: ReturnType<typeof vi.fn>
+  readonly provide: ReturnType<typeof vi.fn>
+  readonly on: ReturnType<typeof vi.fn>
 }
 
 function createContext(): TestContext {
   return {
     llm: { registerAdapter: vi.fn(() => vi.fn()) },
+    authorization: { registerFlow: vi.fn(() => vi.fn()) },
+    credentials: { readRecord: vi.fn(async () => undefined) },
     inject: vi.fn(),
+    provide: vi.fn(() => vi.fn()),
+    on: vi.fn(() => vi.fn()),
     effect: vi.fn((execute: () => (() => void) | (() => Promise<void>)) => {
       execute()
       return vi.fn()
@@ -135,11 +174,12 @@ describe('current plugin configuration', () => {
 })
 
 describe('plugin composition', () => {
-  it('registers the my-codex provider and owns adapter cleanup', async () => {
+  it('registers both providers and owns independent cleanup', async () => {
     const ctx = createContext()
-    let cleanup: (() => void) | (() => Promise<void>) | undefined
-    ctx.effect.mockImplementationOnce((execute: () => (() => void) | (() => Promise<void>)) => {
-      cleanup = execute()
+    const cleanups: Array<(() => void) | (() => Promise<void>)> = []
+    ctx.effect.mockImplementation((execute: () => (() => void) | (() => Promise<void>)) => {
+      const cleanup = execute()
+      cleanups.push(cleanup)
       return vi.fn()
     })
 
@@ -149,9 +189,17 @@ describe('plugin composition', () => {
       [CODEX_PROVIDER],
       expect.any(CodexAdapter),
     )
+    expect(ctx.llm.registerAdapter).toHaveBeenCalledWith(
+      [CODEX_OAUTH_PROVIDER],
+      expect.any(OAuthCodexAdapter),
+    )
     expect(CODEX_PROVIDER).toBe('my-codex')
-    expect(cleanup).toBeDefined()
-    await cleanup?.()
+    expect(CODEX_OAUTH_PROVIDER).toBe('my-codex-oauth')
+    expect(ctx.authorization.registerFlow).toHaveBeenCalledWith(expect.objectContaining({
+      key: 'dsh-ichuny-codex/my-codex-oauth', label: 'ChatGPT (OAuth Preview)',
+    }))
+    expect(cleanups).toHaveLength(3)
+    for (const cleanup of cleanups.reverse()) await cleanup()
   })
 
   it('resolves the current DSH session directory without overriding explicit cwd', () => {
@@ -204,6 +252,11 @@ describe('plugin composition', () => {
     expect(webServer.register).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'exact',
       path: '/api/dsh-ichuny-codex/rate-limits',
+      resource: expect.any(Function),
+    }))
+    expect(webServer.register).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'exact',
+      path: '/api/dsh-ichuny-codex/connection-status',
       resource: expect.any(Function),
     }))
     expect(attachmentContext.effect).toHaveBeenCalledWith(expect.any(Function), expect.stringContaining('detach attachments'))
@@ -264,18 +317,122 @@ describe('plugin composition', () => {
       readRateLimits.mockRestore()
     }
   })
+  it('returns a redacted local connection status without account identifiers', async () => {
+    const readAccount = vi.spyOn(AppServerClient.prototype, 'readAccount')
+      .mockResolvedValueOnce({ authenticated: true, kind: 'chatgpt', requiresOpenaiAuth: false })
+    const listModels = vi.spyOn(AppServerClient.prototype, 'listModels').mockResolvedValueOnce([
+      { id: 'visible', model: 'visible', displayName: 'Visible', description: '', hidden: false, isDefault: true, inputModalities: ['text'], reasoningEfforts: [], defaultReasoningEffort: 'medium' },
+      { id: 'hidden', model: 'hidden', displayName: 'Hidden', description: '', hidden: true, isDefault: false, inputModalities: ['text'], reasoningEfforts: [], defaultReasoningEffort: 'medium' },
+    ])
+    const readRateLimits = vi.spyOn(AppServerClient.prototype, 'readRateLimits').mockResolvedValueOnce({
+      accountId: 'private-account',
+      rateLimits: {
+        planType: 'plus',
+        primary: { usedPercent: 20, resetsAt: 100, token: 'private' },
+        secondary: null,
+        credits: null,
+      },
+    })
+    try {
+      const ctx = createContext()
+      const webServer = { register: vi.fn() }
+      ctx.inject.mockImplementation((services: readonly string[], callback: (value: unknown) => void) => {
+        if (services[0] === 'webServer') callback({ webServer, effect: (execute: () => unknown) => execute() })
+      })
+      apply(ctx as never, { command: 'codex', cwd: '/workspace' })
+      const route = webServer.register.mock.calls
+        .map(call => call[0] as { readonly path: string; readonly resource: () => Promise<Response> })
+        .find(candidate => candidate.path === '/api/dsh-ichuny-codex/connection-status')
+      expect(route).toBeDefined()
+
+      const response = await route?.resource()
+      expect(response?.status).toBe(200)
+      expect(await response?.json()).toEqual({
+        status: 'connected',
+        modelCount: 1,
+        quota: {
+          available: true,
+          planType: 'plus',
+          primary: { usedPercent: 20, resetsAt: 100, windowDurationMins: null },
+          secondary: null,
+          credits: null,
+        },
+        checkedAt: expect.any(Number),
+      })
+    } finally {
+      readAccount.mockRestore()
+      listModels.mockRestore()
+      readRateLimits.mockRestore()
+    }
+  })
+
+  it('distinguishes signed-out state and redacts connection errors', async () => {
+    const readAccount = vi.spyOn(AppServerClient.prototype, 'readAccount')
+      .mockResolvedValueOnce({ authenticated: false, kind: 'chatgpt', requiresOpenaiAuth: true })
+      .mockRejectedValueOnce(new Error('Bearer private-token'))
+    try {
+      const ctx = createContext()
+      const webServer = { register: vi.fn() }
+      ctx.inject.mockImplementation((services: readonly string[], callback: (value: unknown) => void) => {
+        if (services[0] === 'webServer') callback({ webServer, effect: (execute: () => unknown) => execute() })
+      })
+      apply(ctx as never, { command: 'codex', cwd: '/workspace' })
+      const route = webServer.register.mock.calls
+        .map(call => call[0] as { readonly path: string; readonly resource: () => Promise<Response> })
+        .find(candidate => candidate.path === '/api/dsh-ichuny-codex/connection-status')
+      expect(route).toBeDefined()
+
+      const signedOut = await route?.resource()
+      expect(signedOut?.status).toBe(200)
+      expect(await signedOut?.json()).toEqual({
+        status: 'signed-out', modelCount: 0, quota: null, checkedAt: expect.any(Number),
+      })
+
+      const failed = await route?.resource()
+      expect(failed?.status).toBe(503)
+      expect(await failed?.json()).toEqual({
+        status: 'error', error: 'Bearer [REDACTED]', checkedAt: expect.any(Number),
+      })
+    } finally {
+      readAccount.mockRestore()
+    }
+  })
+
   it('registers and disposes the my-codex provider through real Cordis composition', async () => {
     const ctx = new Context()
     const llmFiber = await ctx.plugin(LlmRuntime)
+    const credentialsFiber = await ctx.plugin(TestCredentialProvider)
+    const authorizationFiber = await ctx.plugin(AuthorizationService)
     const pluginFiber = await ctx.plugin(DshCodexPlugin, { command: 'codex', cwd: '/workspace' })
+    const controllerFiber = await ctx.plugin(SiwcRemoteController)
 
     expect(ctx.llm.listProviders()).toContainEqual({
       id: CODEX_PROVIDER,
-      name: 'My Codex',
+      name: 'ChatGPT（本地）',
+    })
+    expect(ctx.llm.listProviders()).toContainEqual({
+      id: CODEX_OAUTH_PROVIDER,
+      name: 'ChatGPT（OAuth Preview）',
     })
 
+    expect(await ctx.siwcRemote.status()).toEqual({ phase: 'disconnected' })
+    const authorizing = await ctx.siwcRemote.start()
+    expect(authorizing).toMatchObject({ phase: 'authorizing', authorizationUrl: expect.stringMatching(/^https:\/\/auth\.openai\.com\//) })
+    expect(await ctx.siwcRemote.cancel()).toEqual({ phase: 'disconnected' })
+    expect(await ctx.siwcRemote.disconnect()).toEqual({ phase: 'disconnected' })
+    expect(ctx.llm.listProviders()).toContainEqual({ id: CODEX_PROVIDER, name: 'ChatGPT（本地）' })
+    expect(TYPERT.invocations.map(invocation => `${invocation.namespace}/${invocation.method}`)).toEqual(expect.arrayContaining([
+      'dshIchunyCodex/status', 'dshIchunyCodex/start', 'dshIchunyCodex/cancel', 'dshIchunyCodex/disconnect',
+    ]))
+
+    await ctx.siwcRemote.start()
+    await controllerFiber.dispose()
+    expect(ctx.authorization.describe('dsh-ichuny-codex/my-codex-oauth' as never)?.inFlight).toBe(false)
     await pluginFiber.dispose()
     expect(ctx.llm.listProviders()).not.toContainEqual(expect.objectContaining({ id: CODEX_PROVIDER }))
+    expect(ctx.llm.listProviders()).not.toContainEqual(expect.objectContaining({ id: CODEX_OAUTH_PROVIDER }))
+    await authorizationFiber.dispose()
+    await credentialsFiber.dispose()
     await llmFiber.dispose()
   })
 })
@@ -286,7 +443,11 @@ describe('package composition metadata', () => {
     const patch = await readFile(join(root, 'cordis.patch.yml'), 'utf8')
     const packageJson = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
       readonly name: string
-      readonly dsh?: { readonly bundle?: { readonly patch?: string } }
+      readonly exports?: Record<string, unknown>
+      readonly dsh?: {
+        readonly bundle?: { readonly patch?: string }
+        readonly client?: { readonly entry?: string; readonly inject?: readonly string[] }
+      }
       readonly peerDependencies?: Record<string, string>
       readonly devDependencies?: Record<string, string>
     }
@@ -294,14 +455,27 @@ describe('package composition metadata', () => {
     expect(name).toBe('dsh-ichuny-codex')
     expect(packageJson.name).toBe('@ipedia/dsh-ichuny-codex')
     expect(packageJson.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
+    expect(packageJson.dsh?.client).toMatchObject({
+      entry: './client.js',
+      inject: expect.arrayContaining([
+        '@deepseek-ai/dsh-client-ui-settings',
+        '@deepseek-ai/dsh-client-locale',
+        '@deepseek-ai/dsh-api-remotes',
+      ]),
+    })
     expect(packageJson.peerDependencies).toMatchObject({
       '@deepseek-ai/cordis': '~4.1.0',
-      '@deepseek-ai/dsh-attachment': '0.2.2-rc.1 || 0.2.2-rc.3 || 0.2.2-rc.5',
-      '@deepseek-ai/dsh-llm': '0.2.2-rc.1 || 0.2.2-rc.3 || 0.2.2-rc.5',
-      '@deepseek-ai/dsh-session': '0.2.2-rc.1 || 0.2.2-rc.3 || 0.2.2-rc.5',
+      '@deepseek-ai/dsh-attachment': '0.2.2-rc.5',
+      '@deepseek-ai/dsh-authorization': '0.2.2-rc.5',
+      '@deepseek-ai/dsh-credentials': '0.2.2-rc.5',
+      '@deepseek-ai/dsh-llm': '0.2.2-rc.5',
+      '@deepseek-ai/dsh-session': '0.2.2-rc.5',
+      '@deepseek-ai/dsh-typert-protocol': '0.2.2-rc.5',
     })
+    expect(packageJson.exports).toMatchObject({ './oauth-controller': expect.any(Object), './typert': expect.any(Object), './remote': expect.any(Object) })
     expect(packageJson.peerDependencies?.['@deepseek-ai/dsh-host-webserver']).toBeUndefined()
     expect(packageJson.devDependencies?.['@deepseek-ai/dsh-host-webserver']).toBe('0.2.2-rc.5')
     expect(patch).toContain("name: '@ipedia/dsh-ichuny-codex'")
+    expect(patch).toContain("name: '@ipedia/dsh-ichuny-codex/oauth-controller'")
   })
 })

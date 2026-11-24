@@ -2,16 +2,16 @@
 title: "Codex App-Server Protocol Surface"
 category: reference
 service: dsh-ichuny-codex
-version: "1.7.15"
+version: "1.8.0"
 tags: [codex, app-server, json-rpc, protocol, streaming]
 created: "2026-08-26"
-last_updated: "2026-11-20"
+last_updated: "2026-11-24"
 description: "Records the app-server methods and wire boundaries used by the current plugin."
 ---
 
 # App-Server Protocol
 
-The plugin starts the pinned native Codex executable directly with `app-server --listen stdio://`, then exchanges one JSON object per line over stdio. `AppServerClient` sends `initialize`, validates the response and sends `initialized`. `apply()` sets `experimentalApi: true` and `requestAttestation: false`. The current client information is `name: softspark_dsh_codex`, `title: SoftSpark DSH Codex`, and version `1.7.15`; client identity is separate from the npm package and provider names. [PATH: src/app-server/transport.ts] [PATH: src/app-server/client.ts] [PATH: src/index.ts]
+The plugin starts the pinned native Codex executable directly with `app-server --listen stdio://`, then exchanges one JSON object per line over stdio. `AppServerClient` sends `initialize`, validates the response and sends `initialized`. `apply()` sets `experimentalApi: true` and `requestAttestation: false`. The current client information is `name: softspark_dsh_codex`, `title: SoftSpark DSH Codex`, and version `1.8.0`; client identity is separate from the npm package and provider names. [PATH: src/app-server/transport.ts] [PATH: src/app-server/client.ts] [PATH: src/index.ts]
 
 ## Used requests
 

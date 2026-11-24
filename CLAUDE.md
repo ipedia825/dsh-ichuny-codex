@@ -28,12 +28,12 @@ npm run package:check
 
 ## Architecture rules
 
-- Codex owns authentication and credential storage.
-- Never read or write Codex auth files, tokens, cookies, or browser callbacks.
-- Never add custom OAuth or an OpenAI API-key fallback.
-- Never call the OpenAI Responses API or another OpenAI HTTP endpoint directly.
-- Start `codex app-server` directly without a shell.
-- Validate every JSON-RPC boundary and redact errors before exposure.
+- The local `my-codex` provider keeps Codex-owned authentication and credential storage. Never read or write Codex auth files, tokens, cookies, or browser callbacks.
+- The sole plugin-owned OAuth exception is OpenAI's official Sign in with ChatGPT open-source flow: dynamic client registration, PKCE/OIDC, its documented scopes, `auth.openai.com` endpoints, and public `api.openai.com/v1/models` and `/v1/responses`.
+- Run that exception only as independent provider `my-codex-oauth` through a separately configured `codex app-server`, with isolated credentials, process lifecycle, replay and pending tools.
+- Never use private ChatGPT `backend-api`, copied third-party client IDs, undocumented scopes/endpoints, or an OpenAI API-key fallback. Never persist SIWC tokens in config, browser storage, URLs, logs, errors, tests, or Codex auth storage.
+- Start every `codex app-server` directly without a shell.
+- Validate every JSON-RPC and OAuth/HTTP boundary and redact errors before exposure.
 - Do not add telemetry, analytics, crash upload, or remote logging.
 - Keep `@deepseek-ai/cordis` and `@deepseek-ai/dsh-llm` as peer dependencies.
 - Treat experimental dynamic tools as untrusted requests with explicit limits.

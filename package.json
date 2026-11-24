@@ -1,7 +1,7 @@
 {
   "name": "@ipedia/dsh-ichuny-codex",
-  "version": "1.7.15",
-  "description": "DeepSeek Harness provider plugin that delegates ChatGPT subscription access and agent execution to the locally authenticated Codex app server.",
+  "version": "1.8.0",
+  "description": "Dual ChatGPT providers for DeepSeek Harness: local Codex login and official SIWC OAuth Preview through isolated Codex app servers.",
   "keywords": [
     "deepseek-harness",
     "dsh-plugin",
@@ -34,6 +34,18 @@
     },
     "./client": {
       "default": "./client.js"
+    },
+    "./oauth-controller": {
+      "types": "./lib/oauth-controller.d.ts",
+      "default": "./lib/oauth-controller.js"
+    },
+    "./typert": {
+      "types": "./lib/typert.d.ts",
+      "default": "./lib/typert.js"
+    },
+    "./remote": {
+      "types": "./lib/typert.remote.d.ts",
+      "default": "./lib/typert.remote.js"
     },
     "./package.json": "./package.json"
   },
@@ -69,7 +81,10 @@
       "entry": "./client.js",
       "inject": [
         "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-model-selection"
+        "@deepseek-ai/dsh-client-ui-model-selection",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-api-remotes"
       ]
     }
   },
@@ -96,24 +111,31 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "3.19.0",
-    "@openai/codex": "0.169.0"
+    "@openai/codex": "0.169.0",
+    "zod": "4.6.6"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
-    "@deepseek-ai/dsh-attachment": "0.2.2-rc.1 || 0.2.2-rc.3 || 0.2.2-rc.5",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.1 || 0.2.2-rc.3 || 0.2.2-rc.5",
-    "@deepseek-ai/dsh-session": "0.2.2-rc.1 || 0.2.2-rc.3 || 0.2.2-rc.5"
+    "@deepseek-ai/dsh-attachment": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-authorization": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.5"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
     "@deepseek-ai/cordis-plugin-include": "1.1.0",
     "@deepseek-ai/cordis-plugin-loader": "1.1.0",
     "@deepseek-ai/dsh-attachment": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-authorization": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.5",
     "@deepseek-ai/dsh-error": "0.2.2-rc.5",
     "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.5",
     "@deepseek-ai/dsh-llm": "0.2.2-rc.5",
     "@deepseek-ai/dsh-scope": "0.2.2-rc.5",
     "@deepseek-ai/dsh-session": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.5",
     "@deepseek-ai/dsh-working-directory": "0.2.2-rc.3",
     "@eslint/js": "10.0.1",
     "@types/node": "26.4.0",

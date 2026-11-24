@@ -2,16 +2,16 @@
 title: "dsh-ichuny-codex Architecture"
 category: reference
 service: dsh-ichuny-codex
-version: "1.7.14"
+version: "1.8.0"
 tags: [architecture, dsh, codex, json-rpc, stdio, web]
 created: "2026-11-14"
-last_updated: "2026-11-16"
+last_updated: "2026-11-24"
 description: "Describes the current provider, app-server transport, attachment handling, tool flow, and Web quota surface."
 ---
 
 # Architecture
 
-`@ipedia/dsh-ichuny-codex` is a Cordis plugin named `dsh-ichuny-codex`. Its patch inserts `llm-codex`; the actual LLM provider ID is `my-codex`, displayed as `My Codex`. The plugin requires the DSH `llm` service and injects `sessions`, `workingDirectory`, `attachments` and `webServer` optionally. \[PATH: src/index.ts] \[PATH: src/adapter.ts] \[PATH: cordis.patch.yml]
+`@ipedia/dsh-ichuny-codex` is a Cordis plugin named `dsh-ichuny-codex`. Its patch inserts `llm-codex` and a separate OAuth controller. LLM provider IDs are `my-codex` (`ChatGPT（本地）`) and `my-codex-oauth` (`ChatGPT（OAuth Preview）`). Required DSH services are `llm`, `credentials` and `authorization`; `sessions`, `workingDirectory`, `attachments` and `webServer` are optional. \[PATH: src/index.ts] \[PATH: src/adapter.ts] \[PATH: cordis.patch.yml]
 
 ## Runtime path
 
@@ -34,5 +34,9 @@ Tool limits include 128 catalog entries, 16 concurrent unanswered calls, 256 KiB
 ## Development boundaries
 
 Codex owns authentication, built-in tools and sandbox prompts. DSH executes DSH tools under its own policy. The app-server transport bounds JSONL lines at 8 MiB, retained stderr at 64 KiB and shutdown stages at 5 seconds by default. The current test runner covers every remaining spec file in `tests/`, including adapter, dynamic tools, Cordis composition and app-server protocol checks; neither a passing build nor those tests establish a live DSH host or Codex smoke result. \[PATH: src/app-server/transport.ts] \[PATH: vitest.config.ts]
+
+## ChatGPT OAuth Preview connection
+
+A Stage 0 decision and narrow security exception exist for a separate `my-codex-oauth` provider using OpenAI's official Sign in with ChatGPT Preview and a separately configured Codex app-server. The current package registers `my-codex` and independent `my-codex-oauth` adapters. The OAuth path has its own credential manager, authenticated controller, app-server generations, replay v2 registration binding, pending tools and cancellation; one real-account OAuth model selection and streamed text turn were reported by the user; image/tool/cancellation/refresh/disconnect live checks remain unverified. [PATH: kb/reference/chatgpt-connection-decision.md] [PATH: CHATGPT_CONNECTION_DESIGN.md]
 
 See [configuration](configuration.md), [protocol](app-server-protocol.md), [security](security.md) and [setup](../howto/setup.md).

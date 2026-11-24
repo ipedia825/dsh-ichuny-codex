@@ -29,6 +29,7 @@ export interface ChildProcessTransportOptions {
   readonly command?: string
   readonly cwd?: string
   readonly env?: Readonly<NodeJS.ProcessEnv>
+  readonly args?: readonly string[]
   readonly maxLineBytes?: number
   readonly maxStderrBytes?: number
   readonly shutdownTimeoutMs?: number
@@ -44,6 +45,7 @@ export class ChildProcessTransport implements AppServerTransport {
   private readonly command: string
   private readonly cwd: string | undefined
   private readonly env: Readonly<NodeJS.ProcessEnv> | undefined
+  private readonly args: string[]
   private readonly maxLineBytes: number
   private readonly maxStderrBytes: number
   private readonly shutdownTimeoutMs: number
@@ -69,6 +71,8 @@ export class ChildProcessTransport implements AppServerTransport {
     this.command = options.command ?? 'codex'
     this.cwd = options.cwd
     this.env = options.env
+    this.args = options.args === undefined ? ['app-server', '--listen', 'stdio://'] : [...options.args]
+    if (this.args.length === 0 || this.args.some(argument => argument.length === 0)) throw new TypeError('args must contain non-empty arguments')
     this.maxLineBytes = positiveInteger(
       options.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES,
       'maxLineBytes',
@@ -99,7 +103,7 @@ export class ChildProcessTransport implements AppServerTransport {
     try {
       child = this.spawnFactory(
         this.command,
-        ['app-server', '--listen', 'stdio://'],
+        this.args,
         {
           cwd: this.cwd,
           env: this.env === undefined ? process.env : { ...this.env },

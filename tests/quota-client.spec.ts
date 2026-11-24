@@ -26,9 +26,12 @@ function loadQuotaComponent(provider: string | undefined): {
   const face = { getSnapshot: () => selection, subscribe: () => () => {} }
   const slots = {
     inject: (_name: string, register: () => void) => register(),
-    register: (options: { inject: (sessionId: string) => { modelDirectory: unknown } }, received: (props: { modelDirectory: unknown }) => unknown) => {
-      component = received
-      props = options.inject('test-session')
+    register: (options: { name: string; inject?: (sessionId: string) => { modelDirectory: unknown } }, received: (props: { modelDirectory: unknown }) => unknown) => {
+      if (options.name === 'conversation.composer.dock' && options.inject !== undefined) {
+        component = received
+        props = options.inject('test-session')
+      }
+      return () => {}
     },
   }
   const context = {
@@ -53,10 +56,20 @@ function loadQuotaComponent(provider: string | undefined): {
               jsx: (type: unknown, properties: unknown) => ({ type, properties }),
               jsxs: (type: unknown, properties: unknown) => ({ type, properties }),
             }
+            if (name === 'zod') return { z: {} }
+            if (name === '@deepseek-ai/dsh-typert-protocol/remote-info') return { createTypertRemoteInfo: (spec: unknown) => spec }
             if (name === 'react-dom') return { createPortal: (child: unknown) => ({ portal: child }) }
             throw new Error(`unexpected require: ${name}`)
           })
-          plugin.apply({ slots, modelDirectories: { directoryFor: () => ({ store: face }) } })
+          plugin.apply({
+            slots,
+            modelDirectories: { directoryFor: () => ({ store: face }) },
+            effect: (execute: () => unknown) => { execute(); return () => {} },
+            locale: { register: () => () => {}, bind: () => (key: string) => key },
+            get: (key: string) => key === 'remote.dshIchunyCodex' ? { status: vi.fn(async () => ({ ok: true, value: { phase: 'disconnected' } })) } : undefined,
+            remote: { $mount: vi.fn(async () => () => {}), dshIchunyCodex: { status: vi.fn(async () => ({ ok: true, value: { phase: 'disconnected' } })) } },
+            configForms: { get: () => ({ getSnapshot: () => ({ status: 'ready', value: { preferredConnection: 'local' }, writable: true }), subscribe: () => () => {}, set: vi.fn(async () => true) }) },
+          })
         },
       },
       setInterval: vi.fn(),
@@ -65,7 +78,7 @@ function loadQuotaComponent(provider: string | undefined): {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     },
-    document: { body: {}, head: { appendChild: (node: { textContent: string }) => { styles.push(node.textContent) } }, getElementById: () => null, createElement: () => ({ id: '', textContent: '' }) },
+    document: { body: {}, head: { appendChild: (node: { textContent: string }) => { styles.push(node.textContent) } }, getElementById: () => null, createElement: () => ({ id: '', textContent: '', remove: vi.fn() }) },
     fetch: fetchMock,
   }
   runInNewContext(clientSource, context)

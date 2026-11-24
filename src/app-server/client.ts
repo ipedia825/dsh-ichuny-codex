@@ -66,10 +66,10 @@ interface PendingRequest {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 const MAX_MODEL_PAGES = 100
-const DEFAULT_CLIENT_INFO: AppServerClientInfo = {
+export const DEFAULT_CLIENT_INFO: AppServerClientInfo = {
   name: 'softspark_dsh_codex',
   title: 'SoftSpark DSH Codex',
-  version: '1.7.15',
+  version: '1.8.0',
 }
 
 export class AppServerRpcError extends Error {
@@ -104,6 +104,7 @@ export class AppServerClient {
   private readonly serverRequestTimeoutMs: number
   private readonly pending = new Map<JsonRpcId, PendingRequest>()
   private readonly listeners = new Set<NotificationListener>()
+  private readonly closeListeners = new Set<(error: Error) => void>()
   private readonly serverRequests = new Set<AbortController>()
 
   private requestId = 0
@@ -128,6 +129,8 @@ export class AppServerClient {
     this.serverRequestHandler = options.serverRequestHandler
   }
 
+  get isClosed(): boolean { return this.closed || this.closing }
+
   start(): Promise<AppServerInitializeResult> {
     if (this.closed || this.closing) {
       return Promise.reject(new Error('Codex app-server client is closed'))
@@ -148,6 +151,12 @@ export class AppServerClient {
   async notify(method: string, params?: JsonObject): Promise<void> {
     await this.start()
     await this.sendNotification(method, params)
+  }
+
+  onClose(listener: (error: Error) => void): () => void {
+    if (this.closed || this.closing) throw new Error('Codex app-server client is closed')
+    this.closeListeners.add(listener)
+    return () => { this.closeListeners.delete(listener) }
   }
 
   onNotification(listener: NotificationListener): () => void {
@@ -445,10 +454,18 @@ export class AppServerClient {
     this.closed = true
     this.closing = false
     const failure = error ?? new Error('Codex app-server transport closed')
+    this.notifyClosed(failure)
     this.rejectPending(failure)
     for (const controller of this.serverRequests) controller.abort(failure)
     this.serverRequests.clear()
     this.listeners.clear()
+  }
+
+  private notifyClosed(error: Error): void {
+    for (const listener of this.closeListeners) {
+      try { listener(error) } catch { /* one consumer must not block transport shutdown */ }
+    }
+    this.closeListeners.clear()
   }
 
   private rejectPending(error: Error): void {
@@ -468,6 +485,7 @@ export class AppServerClient {
     if (this.closed) return
     this.closing = true
     const failure = new Error('Codex app-server client closed')
+    this.notifyClosed(failure)
     this.rejectPending(failure)
     for (const controller of this.serverRequests) controller.abort(failure)
     this.serverRequests.clear()
