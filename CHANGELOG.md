@@ -4,6 +4,25 @@ All notable changes from 2026-11-14 onward are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-11-24
+
+### Added
+
+- Added independent my-codex-oauth and existing my-codex providers in the DSH Web model catalog. The ChatGPT connections settings page manages local status, official SIWC Preview sign-in, cancellation, disconnect, and a non-secret new-chat preference.
+- Added a separate OAuth Codex app-server with dedicated CODEX_HOME, PKCE/OIDC/JWKS validation, bounded official endpoint requests, credential refresh/revocation, and registration-bound replay v2. The OAuth child starts only after a validated grant and never falls back to local Codex.
+- Added isolated local connection status and kept five-hour/weekly quota percentages exclusive to the local provider. OAuth links to official ChatGPT Usage; the SIWC Preview does not expose a documented remaining-quota summary API.
+
+### Fixed
+
+- Recover closed OAuth app-server generations, resume same-account threads after child replacement, reject changed accounts, stop a waiting turn when its transport closes, and close the OAuth child before revoking its credential.
+- Keep returning SIWC sign-in bound to the verified account, replace revoked tokens with a non-secret marker, and guard refresh/authorization races.
+- Mount the authenticated OAuth Remote namespace without external browser modules; preserve the browser click gesture for authorization and provide a link when popup blocking occurs.
+
+### Compatibility and verification
+
+- Require DSH 0.2.2-rc.5 credentials, authorization and Typert seams; remove rc.1/rc.3 compatibility claims and their obsolete release gates.
+- Automated suite, DSH composition, build, security audit and packaging gates pass. The user verified OAuth authorization, model selection and one text conversation on an isolated rc.5 profile. A local real-client smoke verified model discovery, streamed reply and quota using a reviewed native Codex executable; the bundled Windows binary still encounters arg0/SQLite access errors on that host. OAuth image/tool/cancellation/refresh/disconnect paths have not each passed a real-client smoke.
+
 ## [1.7.15] - 2026-11-22
 
 ### Changed
